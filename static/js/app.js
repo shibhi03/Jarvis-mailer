@@ -7,6 +7,18 @@ const state = {
   composeThreadId: null,
   composeInReplyTo: null,
   chatHistory: [],
+  activeChatId: null,
+  assistantChats: [],
+  page: 1,
+  pageSize: 25,
+  totalPages: 1,
+  meetingPage: 1,
+  meetingTotalPages: 1,
+  calendarMode: "list",
+  calendarPage: 1,
+  calendarTotalPages: 1,
+  pendingMeeting: null,
+  calendarMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   filters: {
     q: "",
     sender: "",
@@ -28,7 +40,11 @@ async function apiFetch(url, options = {}) {
   const resp = await fetch(url, { ...options, headers });
   const text = await resp.text();
   try {
-    return JSON.parse(text);
+    const data = JSON.parse(text);
+    if (!resp.ok) {
+      return { ...data, error: data.error || `Request failed (${resp.status})`, status_code: resp.status };
+    }
+    return data;
   } catch {
     return { error: `Server error (${resp.status})` };
   }
@@ -64,6 +80,10 @@ function updateContextPill() {
     pill.textContent = `Context: Reading "${state.openEmail.subject.slice(0, 28)}"`;
   } else if (state.currentView === "compose") {
     pill.textContent = "Context: Composing email";
+  } else if (state.currentView === "calendar") {
+    pill.textContent = "Context: Calendar";
+  } else if (state.currentView === "meetings") {
+    pill.textContent = "Context: Meeting emails";
   } else {
     pill.textContent = `Context: ${state.folder === "sent" ? "Sent" : "Inbox"}`;
   }
@@ -81,6 +101,9 @@ function switchView(viewName) {
   } else if (viewName === "contacts") {
     document.getElementById("view-contacts").classList.add("active");
     document.getElementById("nav-contacts").classList.add("active");
+  } else if (viewName === "meetings" || viewName === "calendar") {
+    document.getElementById(`view-${viewName}`).classList.add("active");
+    document.getElementById(`nav-${viewName}`).classList.add("active");
   } else {
     const validFolders = ["inbox", "starred", "sent", "drafts", "scheduled", "spam", "bin"];
     state.folder = validFolders.includes(viewName) ? viewName : "inbox";
@@ -104,7 +127,6 @@ function switchView(viewName) {
 
 function renderEmailList(emails) {
   const listEl = document.getElementById("email-list");
-  document.getElementById("list-count").textContent = `${emails.length} email${emails.length === 1 ? "" : "s"}`;
 
   if (!emails.length) {
     listEl.innerHTML = `<div class="rich-card">No emails match the current filters.</div>`;
@@ -160,15 +182,186 @@ function updateUnreadBadge(count) {
 }
 
 async function fetchEmails() {
-  const params = new URLSearchParams({ folder: state.folder });
+  const params = new URLSearchParams({ folder: state.folder, page: String(state.page), per_page: String(state.pageSize) });
   if (state.filters.q) params.set("q", state.filters.q);
   if (state.filters.sender) params.set("sender", state.filters.sender);
   if (state.filters.is_read !== "") params.set("is_read", state.filters.is_read);
   if (state.filters.days) params.set("days", state.filters.days);
 
   const data = await apiFetch(`/api/emails/?${params.toString()}`);
+  if (data.error) { showToast(`Couldn't load emails: ${data.error}`); return; }
   renderEmailList(data.emails || []);
+  const pagination = data.pagination || { page: 1, total_pages: 1, total_count: (data.emails || []).length, has_next: false, has_previous: false };
+  state.page = pagination.page;
+  state.totalPages = pagination.total_pages;
+  document.getElementById("list-count").textContent = `${pagination.total_count} email${pagination.total_count === 1 ? "" : "s"}`;
+  document.getElementById("page-status").textContent = `Page ${pagination.page} of ${pagination.total_pages}`;
+  document.getElementById("btn-page-prev").disabled = !pagination.has_previous;
+  document.getElementById("btn-page-next").disabled = !pagination.has_next;
   updateUnreadBadge(data.unread_count || 0);
+}
+
+function localDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+async function fetchMeetingEmails() {
+  const data = await apiFetch(`/api/meetings/?page=${state.meetingPage}&tz_offset_minutes=${new Date().getTimezoneOffset()}`);
+  if (data.error) { showToast(`Couldn't find meeting emails: ${data.error}`); return; }
+  const meetings = data.meetings || [];
+  const pagination = data.pagination || { page: 1, total_pages: 1, total_count: meetings.length, has_next: false, has_previous: false };
+  state.meetingPage = pagination.page;
+  state.meetingTotalPages = pagination.total_pages;
+  document.getElementById("meeting-count").textContent = `${pagination.total_count} found`;
+  document.getElementById("meeting-page-status").textContent = `Page ${pagination.page} of ${pagination.total_pages}`;
+  document.getElementById("meeting-page-prev").disabled = !pagination.has_previous;
+  document.getElementById("meeting-page-next").disabled = !pagination.has_next;
+  const container = document.getElementById("meeting-email-list");
+  if (!meetings.length) {
+    container.innerHTML = `<div class="calendar-empty">No meeting emails with a recognizable date or time were found.</div>`;
+    return;
+  }
+  container.innerHTML = meetings.map((meeting) => `
+    <article class="meeting-email-card" data-email-id="${meeting.email_id}">
+      <h3>${escapeHtml(meeting.title)}</h3>
+      <div class="meeting-email-meta">${escapeHtml(meeting.sender_name || meeting.sender_email)} · ${meeting.has_date ? "Date found" : "Date inferred from email"}${meeting.has_time ? " · Time found" : " · No time found"}</div>
+      <div><strong>${new Date(meeting.start_at).toLocaleString([], { dateStyle: "medium", timeStyle: meeting.all_day ? undefined : "short" })}${meeting.all_day ? " · all day" : ""}</strong></div>
+      <div class="meeting-email-snippet">${escapeHtml(meeting.snippet)}</div>
+      <div class="meeting-email-actions">
+        ${meeting.already_added ? `<span class="muted">Already on calendar</span>` : new Date(meeting.start_at) <= new Date() ? `<span class="muted">Past event</span>` : `<label class="muted">Remind me <select class="select reminder-choice"><option value="0">At event time</option><option value="5">5 min before</option><option value="15" selected>15 min before</option><option value="30">30 min before</option><option value="60">1 hour before</option></select></label><button class="btn btn-sm btn-primary btn-add-calendar" type="button">Review &amp; add</button>`}
+        <button class="btn btn-sm btn-outline btn-open-meeting-email" type="button">Open email</button>
+      </div>
+    </article>`).join("");
+  container.querySelectorAll(".btn-open-meeting-email").forEach((button) => button.addEventListener("click", () => {
+    const id = Number(button.closest("[data-email-id]").dataset.emailId);
+    openEmailDetail(id);
+  }));
+  container.querySelectorAll(".btn-add-calendar").forEach((button) => button.addEventListener("click", async () => {
+    const card = button.closest("[data-email-id]");
+    const meeting = meetings.find((item) => item.email_id === Number(card.dataset.emailId));
+    const reminderMinutes = Number(card.querySelector(".reminder-choice").value);
+    button.disabled = true;
+    const added = await addDetectedMeeting(meeting, reminderMinutes);
+    if (!added) button.disabled = false;
+  }));
+}
+
+async function addDetectedMeeting(meeting, reminderMinutes = 15) {
+  const when = new Date(meeting.start_at).toLocaleString();
+  const reminderText = reminderMinutes ? `${reminderMinutes} minutes before` : "at the event time";
+  if (!window.confirm(`Please approve adding this meeting to your Jarvis calendar:\n\n${meeting.title}\n${when}\nReminder: ${reminderText}`)) return false;
+  const result = await apiFetch("/api/calendar/events/", { method: "POST", body: JSON.stringify({
+    confirmed: true, email_id: meeting.email_id, start_at: meeting.start_at,
+    all_day: meeting.all_day, reminder_minutes: reminderMinutes,
+  }) });
+  if (!result.event) { showToast(result.error || "Couldn't add the meeting"); return false; }
+  document.getElementById("meeting-approval-banner").classList.add("hidden");
+  state.pendingMeeting = null;
+  showToast("Meeting added to your calendar");
+  if (state.currentView === "meetings") fetchMeetingEmails();
+  if (state.currentView === "calendar") fetchCalendar();
+  checkMeetingSuggestions();
+  return true;
+}
+
+async function checkMeetingSuggestions() {
+  const data = await apiFetch(`/api/meetings/?page=1&pending=1&tz_offset_minutes=${new Date().getTimezoneOffset()}`);
+  if (data.error) return;
+  let dismissed = [];
+  try { dismissed = JSON.parse(localStorage.getItem("jarvis_dismissed_meetings") || "[]"); } catch { dismissed = []; }
+  const meeting = (data.meetings || []).find((item) => !item.already_added && !dismissed.includes(item.email_id));
+  const banner = document.getElementById("meeting-approval-banner");
+  if (!meeting) { banner.classList.add("hidden"); state.pendingMeeting = null; return; }
+  state.pendingMeeting = meeting;
+  document.getElementById("meeting-approval-title").textContent = `Meeting mentioned in “${meeting.title}”`;
+  document.getElementById("meeting-approval-time").textContent = `${new Date(meeting.start_at).toLocaleString()} · Review before adding to Calendar`;
+  banner.classList.remove("hidden");
+}
+
+async function fetchCalendar() {
+  const month = `${state.calendarMonth.getFullYear()}-${String(state.calendarMonth.getMonth() + 1).padStart(2, "0")}`;
+  document.getElementById("calendar-month-title").textContent = state.calendarMonth.toLocaleDateString([], { month: "long", year: "numeric" });
+  const isList = state.calendarMode === "list";
+  document.getElementById("calendar-events-list").classList.toggle("hidden", !isList);
+  document.getElementById("calendar-month-view").classList.toggle("hidden", isList);
+  document.getElementById("calendar-month-navigation").classList.toggle("hidden", isList);
+  document.getElementById("calendar-list-pagination").classList.toggle("hidden", !isList);
+  document.getElementById("calendar-list-mode").className = `btn btn-sm ${isList ? "btn-primary" : "btn-outline"}`;
+  document.getElementById("calendar-month-mode").className = `btn btn-sm ${isList ? "btn-outline" : "btn-primary"}`;
+  const url = isList
+    ? `/api/calendar/events/?view=list&page=${state.calendarPage}`
+    : `/api/calendar/events/?month=${month}&tz_offset_minutes=${new Date().getTimezoneOffset()}`;
+  const data = await apiFetch(url);
+  if (data.error) { showToast(`Couldn't load calendar: ${data.error}`); return; }
+  if (isList) {
+    const page = data.pagination || { page: 1, total_pages: 1, total_count: (data.events || []).length, has_next: false, has_previous: false };
+    state.calendarPage = page.page;
+    state.calendarTotalPages = page.total_pages;
+    document.getElementById("calendar-page-status").textContent = `Page ${page.page} of ${page.total_pages} · ${page.total_count} events`;
+    document.getElementById("calendar-page-prev").disabled = !page.has_previous;
+    document.getElementById("calendar-page-next").disabled = !page.has_next;
+    renderCalendarList(data.events || []);
+  } else renderCalendar(data.events || []);
+}
+
+function renderCalendarList(events) {
+  const list = document.getElementById("calendar-events-list");
+  if (!events.length) {
+    list.innerHTML = `<div class="calendar-empty">No events yet. Add one here or review a meeting email.</div>`;
+    return;
+  }
+  list.innerHTML = events.map((event) => `<button class="calendar-event-row" data-event-id="${event.id}" type="button"><span class="calendar-event-time">${new Date(event.start_at).toLocaleString([], { dateStyle: "medium", timeStyle: event.all_day ? undefined : "short" })}${event.all_day ? " · all day" : ""}</span><span><span class="calendar-event-title">${escapeHtml(event.title)}</span><span class="calendar-event-description">${event.source_email_id ? "From an email · Click to open" : "Personal event"}</span></span></button>`).join("");
+  list.querySelectorAll(".calendar-event-row").forEach((button) => button.addEventListener("click", () => {
+    const event = events.find((item) => item.id === Number(button.dataset.eventId));
+    list.querySelectorAll(".calendar-event-row").forEach((row) => row.classList.toggle("selected", row === button));
+    showCalendarEmail(event);
+  }));
+}
+
+async function showCalendarEmail(event) {
+  const panel = document.getElementById("calendar-email-panel");
+  if (!event.source_email_id) {
+    panel.innerHTML = `<h3>${escapeHtml(event.title)}</h3><div class="meeting-email-meta">${new Date(event.start_at).toLocaleString()}</div><div class="thread-body">${escapeHtml(event.description || "No notes for this event.")}</div><div class="meeting-email-meta">Reminder: ${event.reminder_minutes ? `${event.reminder_minutes} minutes before` : "at event time"}</div>`;
+    return;
+  }
+  panel.innerHTML = `<div class="muted">Loading related email…</div>`;
+  const data = await apiFetch(`/api/emails/${event.source_email_id}/`);
+  if (!data.email) { panel.innerHTML = `<div class="calendar-empty">Couldn't load the related email.</div>`; return; }
+  const email = data.email;
+  const thread = data.thread?.length ? data.thread : [email];
+  panel.innerHTML = `<h3>${escapeHtml(email.subject)}</h3>${thread.map((message) => `<div class="meeting-email-meta">${escapeHtml(message.sender_name)} &lt;${escapeHtml(message.sender_email)}&gt; · ${new Date(message.received_at).toLocaleString()}</div><div class="thread-body">${escapeHtml(message.body_text)}</div>`).join("")}<button id="calendar-open-full-email" class="btn btn-sm btn-outline" type="button">Open full email</button>`;
+  document.getElementById("calendar-open-full-email").addEventListener("click", () => openEmailDetail(email.id));
+}
+
+function renderCalendar(events) {
+  const grid = document.getElementById("calendar-grid");
+  const first = new Date(state.calendarMonth.getFullYear(), state.calendarMonth.getMonth(), 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const gridStart = new Date(first.getFullYear(), first.getMonth(), 1 - startOffset);
+  const eventsByDate = new Map();
+  events.forEach((event) => {
+    const key = localDateKey(event.start_at);
+    if (!eventsByDate.has(key)) eventsByDate.set(key, []);
+    eventsByDate.get(key).push(event);
+  });
+  grid.innerHTML = Array.from({ length: 42 }, (_, index) => {
+    const day = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index);
+    const dayEvents = eventsByDate.get(localDateKey(day)) || [];
+    return `<div class="calendar-day${day.getMonth() === state.calendarMonth.getMonth() ? "" : " outside-month"}${localDateKey(day) === localDateKey(new Date()) ? " today" : ""}"><div class="calendar-day-number">${day.getDate()}</div>${dayEvents.map((event) => `<button class="calendar-event-chip" data-event-id="${event.id}" type="button" title="${escapeHtml(event.title)} · ${new Date(event.start_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}">${event.all_day ? "All day" : new Date(event.start_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} ${escapeHtml(event.title)}</button>`).join("")}</div>`;
+  }).join("");
+  grid.querySelectorAll(".calendar-event-chip").forEach((button) => button.addEventListener("click", () => {
+    const event = events.find((item) => item.id === Number(button.dataset.eventId));
+    if (event) showCalendarEmail(event);
+  }));
+}
+
+async function checkCalendarReminders() {
+  const data = await apiFetch("/api/calendar/reminders/");
+  for (const reminder of data.reminders || []) {
+    showToast(`Reminder: ${reminder.title} · ${new Date(reminder.start_at).toLocaleString()}`);
+    await apiFetch(`/api/calendar/reminders/${reminder.id}/ack/`, { method: "POST", body: "{}" });
+  }
 }
 
 function renderDetailView(email, thread) {
@@ -259,11 +452,24 @@ async function sendComposeDraft(draft) {
   return false;
 }
 
+function syncComposeConfirmationCards() {
+  const toValue = document.getElementById("compose-to").value;
+  const subjectValue = document.getElementById("compose-subject").value;
+  document.querySelectorAll(".send-confirmation-card").forEach((card) => {
+    const to = card.querySelector(".confirm-to");
+    const subject = card.querySelector(".confirm-subject");
+    if (to) to.textContent = toValue;
+    if (subject) subject.textContent = subjectValue;
+  });
+}
+
 async function executeUiActions(actions = []) {
   for (const action of actions) {
     if (action.type === "navigate_view") {
       switchView(action.view);
       if (action.view === "contacts") fetchContacts();
+      else if (action.view === "meetings") fetchMeetingEmails();
+      else if (action.view === "calendar") fetchCalendar();
     } else if (action.type === "fill_compose") {
       switchView("compose");
       state.composeThreadId = action.thread_id || null;
@@ -273,6 +479,17 @@ async function executeUiActions(actions = []) {
       await animateFieldFill(document.getElementById("compose-to"), action.to || "");
       await animateFieldFill(document.getElementById("compose-subject"), action.subject || "");
       await animateFieldFill(document.getElementById("compose-body"), action.body || "");
+      if (action.scheduled_at) {
+        const when = new Date(action.scheduled_at);
+        const local = new Date(when.getTime() - when.getTimezoneOffset() * 60000);
+        document.getElementById("compose-schedule-at").value = local.toISOString().slice(0, 16);
+      }
+    } else if (action.type === "update_compose_draft") {
+      switchView("compose");
+      if (action.to !== undefined) document.getElementById("compose-to").value = action.to;
+      await animateFieldFill(document.getElementById("compose-subject"), action.subject || "");
+      await animateFieldFill(document.getElementById("compose-body"), action.body || "");
+      syncComposeConfirmationCards();
     } else if (action.type === "apply_filters") {
       state.folder = action.folder || "inbox";
       state.filters.q = action.q || "";
@@ -286,7 +503,8 @@ async function executeUiActions(actions = []) {
       document.getElementById("filter-days").value = state.filters.days;
 
       switchView(state.folder);
-      renderEmailList(action.emails || []);
+      state.page = 1;
+      fetchEmails();
     } else if (action.type === "open_email" && action.email) {
       renderDetailView(action.email, action.thread || [action.email]);
     } else if (action.type === "close_email") {
@@ -362,7 +580,7 @@ async function fetchContacts() {
   });
 }
 
-function appendAssistantMessage(text, richCards = [], agentSteps = []) {
+function appendAssistantMessage(text, richCards = [], agentSteps = [], historical = false) {
   const container = document.getElementById("assistant-messages");
   const wrapper = document.createElement("div");
   wrapper.className = "msg msg-assistant";
@@ -371,7 +589,7 @@ function appendAssistantMessage(text, richCards = [], agentSteps = []) {
     const stepsEl = document.createElement("div");
     stepsEl.className = "agent-steps";
     stepsEl.innerHTML = agentSteps
-      .map((s) => `<span class="agent-step-pill">✓ ${escapeHtml(s)}</span>`)
+      .map((s) => `<span class="agent-step-pill">${escapeHtml(s)}</span>`)
       .join("");
     wrapper.appendChild(stepsEl);
   }
@@ -394,11 +612,22 @@ function appendAssistantMessage(text, richCards = [], agentSteps = []) {
       wrapper.appendChild(c);
     } else if (card.type === "send_confirmation" && card.draft) {
       const c = document.createElement("div");
-      c.className = "rich-card";
+      if (historical) {
+        c.className = "rich-card";
+        c.innerHTML = `
+          <div class="rich-card-title">Drafted email</div>
+          <div class="rich-card-sub">To: ${escapeHtml(card.draft.to)}</div>
+          <div><strong>${escapeHtml(card.draft.subject)}</strong></div>
+          <div class="muted">Previous draft preview</div>
+        `;
+        wrapper.appendChild(c);
+        continue;
+      }
+      c.className = "rich-card send-confirmation-card";
       c.innerHTML = `
         <div class="rich-card-title">Confirm Send</div>
-        <div class="rich-card-sub">To: ${escapeHtml(card.draft.to)}</div>
-        <div><strong>${escapeHtml(card.draft.subject)}</strong></div>
+        <div class="rich-card-sub">To: <span class="confirm-to">${escapeHtml(card.draft.to)}</span></div>
+        <div><strong class="confirm-subject">${escapeHtml(card.draft.subject)}</strong></div>
         <div class="confirm-actions">
           <button class="btn btn-sm btn-primary btn-confirm-send">Confirm & Send</button>
           <button class="btn btn-sm btn-ghost btn-cancel-send">Cancel</button>
@@ -407,9 +636,9 @@ function appendAssistantMessage(text, richCards = [], agentSteps = []) {
       c.querySelector(".btn-confirm-send").addEventListener("click", async (e) => {
         e.target.disabled = true;
         const ok = await sendComposeDraft({
-          to: document.getElementById("compose-to").value || card.draft.to,
-          subject: document.getElementById("compose-subject").value || card.draft.subject,
-          body: document.getElementById("compose-body").value || card.draft.body,
+          to: document.getElementById("compose-to").value,
+          subject: document.getElementById("compose-subject").value,
+          body: document.getElementById("compose-body").value,
           thread_id: card.draft.thread_id,
           in_reply_to: card.draft.in_reply_to,
         });
@@ -419,11 +648,119 @@ function appendAssistantMessage(text, richCards = [], agentSteps = []) {
         c.querySelector(".confirm-actions").innerHTML = `<span class="muted">Cancelled</span>`;
       });
       wrapper.appendChild(c);
+    } else if (card.type === "schedule_confirmation" && card.draft) {
+      const c = document.createElement("div");
+      c.className = "rich-card schedule-confirmation-card";
+      c.innerHTML = `<div class="rich-card-title">Confirm Schedule</div><div class="rich-card-sub">To: ${escapeHtml(card.draft.to)}</div><div><strong>${escapeHtml(card.draft.subject)}</strong></div><div class="muted">${escapeHtml(new Date(card.draft.scheduled_at).toLocaleString())}</div><div class="confirm-actions"><button class="btn btn-sm btn-primary">Confirm &amp; Schedule</button><button class="btn btn-sm btn-ghost">Cancel</button></div>`;
+      const [confirmButton, cancelButton] = c.querySelectorAll("button");
+      if (historical) {
+        c.querySelector(".confirm-actions").textContent = "Previous schedule preview";
+      } else {
+        confirmButton.addEventListener("click", async () => {
+          confirmButton.disabled = true;
+          const dateValue = document.getElementById("compose-schedule-at").value;
+          const res = await apiFetch("/api/emails/schedule/", { method: "POST", body: JSON.stringify({
+            confirmed: true, draft_id: state.composeDraftId,
+            to: document.getElementById("compose-to").value,
+            subject: document.getElementById("compose-subject").value,
+            body: document.getElementById("compose-body").value,
+            scheduled_at: dateValue ? new Date(dateValue).toISOString() : "",
+            thread_id: state.composeThreadId, in_reply_to: state.composeInReplyTo,
+          }) });
+          if (res.status === "scheduled") {
+            c.querySelector(".confirm-actions").textContent = "✓ Scheduled";
+            state.composeDraftId = null;
+            showToast("Email scheduled");
+            switchView("scheduled"); state.page = 1; fetchEmails();
+          } else { confirmButton.disabled = false; showToast(res.error || "Failed to schedule email"); }
+        });
+        cancelButton.addEventListener("click", () => { c.querySelector(".confirm-actions").textContent = "Cancelled"; });
+      }
+      wrapper.appendChild(c);
     }
   }
 
   container.appendChild(wrapper);
   container.scrollTop = container.scrollHeight;
+}
+
+function showAssistantWelcome() {
+  const container = document.getElementById("assistant-messages");
+  container.replaceChildren();
+  const welcome = document.createElement("div");
+  welcome.className = "msg msg-assistant";
+  const bubble = document.createElement("div");
+  bubble.className = "msg-bubble";
+  bubble.innerHTML = "Hi! I'm <strong>Jarvis</strong>. Tell me what to do and I'll drive the mail UI for you — compose emails, filter your inbox, open threads, or reply to the email you're reading.";
+  welcome.appendChild(bubble);
+  container.appendChild(welcome);
+}
+
+function renderAssistantChatList() {
+  const container = document.getElementById("assistant-chat-history");
+  container.replaceChildren();
+  state.assistantChats.forEach((chat) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `assistant-chat-item${String(chat.id) === String(state.activeChatId) ? " active" : ""}`;
+    button.textContent = chat.title || "New chat";
+    button.title = chat.last_message || chat.title || "New chat";
+    button.addEventListener("click", () => openAssistantChat(chat.id));
+    container.appendChild(button);
+  });
+}
+
+async function refreshAssistantChatList() {
+  const data = await apiFetch("/api/assistant/chats/");
+  if (data.error) return data;
+  state.assistantChats = data.chats || [];
+  renderAssistantChatList();
+  return data;
+}
+
+async function openAssistantChat(chatId) {
+  const data = await apiFetch(`/api/assistant/chats/${chatId}/`);
+  if (!data.chat) return;
+  state.activeChatId = data.chat.id;
+  localStorage.setItem("jarvis_active_chat", String(state.activeChatId));
+  state.chatHistory = data.messages || [];
+  const container = document.getElementById("assistant-messages");
+  container.replaceChildren();
+  if (!state.chatHistory.length) showAssistantWelcome();
+  state.chatHistory.forEach((message) => {
+    if (message.role === "user") appendUserMessage(message.content);
+    else appendAssistantMessage(message.content, message.rich_cards || [], message.agent_steps || [], true);
+  });
+  renderAssistantChatList();
+}
+
+async function createAssistantChat() {
+  const data = await apiFetch("/api/assistant/chats/new/", { method: "POST", body: "{}" });
+  if (!data.chat) {
+    showToast(data.error || "Couldn't create a new chat");
+    return;
+  }
+  state.activeChatId = data.chat.id;
+  state.chatHistory = [];
+  localStorage.setItem("jarvis_active_chat", String(state.activeChatId));
+  state.assistantChats = [data.chat, ...state.assistantChats.filter((chat) => String(chat.id) !== String(data.chat.id))];
+  renderAssistantChatList();
+  showAssistantWelcome();
+}
+
+async function loadAssistantChats() {
+  const data = await refreshAssistantChatList();
+  if (data?.error) {
+    showToast(`Chat history couldn't load: ${data.error}`);
+    return;
+  }
+  if (!state.assistantChats.length) {
+    await createAssistantChat();
+    return;
+  }
+  const savedId = localStorage.getItem("jarvis_active_chat");
+  const selected = state.assistantChats.find((chat) => String(chat.id) === savedId) || state.assistantChats[0];
+  await openAssistantChat(selected.id);
 }
 
 function appendUserMessage(text) {
@@ -436,24 +773,43 @@ function appendUserMessage(text) {
 }
 
 async function sendAssistantCommand(message) {
+  if (!state.activeChatId) await createAssistantChat();
   appendUserMessage(message);
+  const uiContext = {
+    current_view: state.currentView,
+    open_email_id: state.openEmailId,
+    active_filters: state.filters,
+    tz_offset_minutes: new Date().getTimezoneOffset(),
+  };
+  if (state.currentView === "compose") {
+    uiContext.compose_draft = {
+      to: document.getElementById("compose-to").value,
+      subject: document.getElementById("compose-subject").value,
+      body: document.getElementById("compose-body").value,
+    };
+  }
   const res = await apiFetch("/api/assistant/command/", {
     method: "POST",
     body: JSON.stringify({
       message,
-      history: state.chatHistory.slice(-6),
-      ui_context: {
-        current_view: state.currentView,
-        open_email_id: state.openEmailId,
-        active_filters: state.filters,
-        tz_offset_minutes: new Date().getTimezoneOffset(),
-      },
+      conversation_id: state.activeChatId,
+      ui_context: uiContext,
     }),
   });
+  if (res.error) {
+    appendAssistantMessage(`I couldn't process that request: ${res.error}`);
+    showToast(`Jarvis request failed: ${res.error}`);
+    return;
+  }
   await executeUiActions(res.ui_actions || []);
-  const replyText = res.reply || "Done.";
+  const replyText = res.reply || "I couldn't determine an action for that request. Please rephrase it.";
+  if (res.conversation_id) state.activeChatId = res.conversation_id;
   appendAssistantMessage(replyText, res.rich_cards || [], res.agent_steps || []);
-  state.chatHistory.push({ role: "user", content: message }, { role: "assistant", content: replyText });
+  state.chatHistory.push(
+    { role: "user", content: message, context: uiContext },
+    { role: "assistant", content: replyText, rich_cards: res.rich_cards || [], agent_steps: res.agent_steps || [] },
+  );
+  await refreshAssistantChatList();
 }
 
 async function loadAuthStatus() {
@@ -488,6 +844,7 @@ function initRealtimeSSE() {
     if (state.currentView === "inbox") {
       fetchEmails();
     }
+    checkMeetingSuggestions();
   });
 }
 
@@ -500,7 +857,9 @@ document.addEventListener("DOMContentLoaded", () => {
   initTheme();
   loadAuthStatus();
   fetchEmails();
+  checkMeetingSuggestions();
   initRealtimeSSE();
+  loadAssistantChats();
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -509,7 +868,14 @@ document.addEventListener("DOMContentLoaded", () => {
       if (btn.dataset.view === "contacts") {
         switchView("contacts");
         fetchContacts();
+      } else if (btn.dataset.view === "meetings") {
+        switchView("meetings");
+        fetchMeetingEmails();
+      } else if (btn.dataset.view === "calendar") {
+        switchView("calendar");
+        fetchCalendar();
       } else {
+        state.page = 1;
         switchView(btn.dataset.folder);
         fetchEmails();
       }
@@ -623,6 +989,10 @@ document.addEventListener("DOMContentLoaded", () => {
     state.composeDraftId = null;
   });
 
+  ["compose-to", "compose-subject"].forEach((id) =>
+    document.getElementById(id).addEventListener("input", syncComposeConfirmationCards)
+  );
+
   document.getElementById("btn-save-draft").addEventListener("click", async () => {
     const res = await apiFetch("/api/emails/draft/", {
       method: "POST",
@@ -651,14 +1021,23 @@ document.addEventListener("DOMContentLoaded", () => {
       showToast("Please pick a date and time to schedule send");
       return;
     }
+    const recipient = document.getElementById("compose-to").value.trim();
+    const subject = document.getElementById("compose-subject").value.trim();
+    const body = document.getElementById("compose-body").value.trim();
+    if (!recipient || !subject || !body) { showToast("Complete the recipient, subject, and message before scheduling"); return; }
+    const when = new Date(scheduledAt);
+    if (when <= new Date()) { showToast("Choose a future date and time"); return; }
+    const confirmed = window.confirm(`Review your draft before scheduling:\n\nTo: ${recipient}\nSubject: ${subject}\nSend at: ${when.toLocaleString()}\n\nMessage:\n${body}\n\nSchedule this email?`);
+    if (!confirmed) return;
     const res = await apiFetch("/api/emails/schedule/", {
       method: "POST",
       body: JSON.stringify({
         draft_id: state.composeDraftId,
+        confirmed: true,
         to: document.getElementById("compose-to").value,
         subject: document.getElementById("compose-subject").value,
         body: document.getElementById("compose-body").value,
-        scheduled_at: scheduledAt,
+        scheduled_at: when.toISOString(),
         thread_id: state.composeThreadId,
         in_reply_to: state.composeInReplyTo,
       }),
@@ -681,6 +1060,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (state.currentView !== "inbox" && state.currentView !== "sent") {
       switchView(state.folder);
     }
+    state.page = 1;
     fetchEmails();
   };
 
@@ -697,8 +1077,12 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("filter-sender").value = "";
     document.getElementById("filter-read").value = "";
     document.getElementById("filter-days").value = "";
+    state.page = 1;
     fetchEmails();
   });
+
+  document.getElementById("btn-page-prev").addEventListener("click", () => { if (state.page > 1) { state.page -= 1; fetchEmails(); } });
+  document.getElementById("btn-page-next").addEventListener("click", () => { if (state.page < state.totalPages) { state.page += 1; fetchEmails(); } });
 
   document.getElementById("assistant-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -708,6 +1092,74 @@ document.addEventListener("DOMContentLoaded", () => {
     input.value = "";
     await sendAssistantCommand(msg);
   });
+
+  document.getElementById("btn-new-chat").addEventListener("click", createAssistantChat);
+
+  document.getElementById("meeting-approval-add").addEventListener("click", async () => {
+    if (state.pendingMeeting) await addDetectedMeeting(state.pendingMeeting, 15);
+  });
+  document.getElementById("meeting-approval-dismiss").addEventListener("click", () => {
+    if (state.pendingMeeting) {
+      let dismissed = [];
+      try { dismissed = JSON.parse(localStorage.getItem("jarvis_dismissed_meetings") || "[]"); } catch { dismissed = []; }
+      dismissed.push(state.pendingMeeting.email_id);
+      localStorage.setItem("jarvis_dismissed_meetings", JSON.stringify(dismissed.slice(-100)));
+    }
+    state.pendingMeeting = null;
+    document.getElementById("meeting-approval-banner").classList.add("hidden");
+    checkMeetingSuggestions();
+  });
+  document.getElementById("calendar-list-mode").addEventListener("click", () => { state.calendarMode = "list"; state.calendarPage = 1; fetchCalendar(); });
+  document.getElementById("calendar-month-mode").addEventListener("click", () => { state.calendarMode = "month"; fetchCalendar(); });
+  document.getElementById("calendar-add-event").addEventListener("click", () => {
+    document.getElementById("calendar-add-form").classList.toggle("hidden");
+  });
+  document.getElementById("calendar-cancel-add").addEventListener("click", () => {
+    document.getElementById("calendar-add-form").reset();
+    document.getElementById("calendar-add-form").classList.add("hidden");
+  });
+  document.getElementById("calendar-add-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const title = document.getElementById("calendar-event-title").value.trim();
+    const rawStart = document.getElementById("calendar-event-start").value;
+    const startAt = new Date(rawStart);
+    const reminderMinutes = Number(document.getElementById("calendar-event-reminder").value);
+    if (!title || !rawStart || Number.isNaN(startAt.getTime())) { showToast("Add an event title and valid date/time"); return; }
+    if (startAt <= new Date()) { showToast("Choose a future date and time"); return; }
+    if (!window.confirm(`Add this event to your Jarvis calendar?\n\n${title}\n${startAt.toLocaleString()}\nReminder: ${reminderMinutes ? `${reminderMinutes} minutes before` : "at event time"}`)) return;
+    const result = await apiFetch("/api/calendar/events/", { method: "POST", body: JSON.stringify({
+      confirmed: true, title, start_at: startAt.toISOString(), reminder_minutes: reminderMinutes,
+    }) });
+    if (result.event) {
+      showToast("Event added to your calendar");
+      document.getElementById("calendar-add-form").reset();
+      document.getElementById("calendar-add-form").classList.add("hidden");
+      fetchCalendar();
+    } else showToast(result.error || "Couldn't add event");
+  });
+
+  document.getElementById("calendar-prev").addEventListener("click", () => {
+    state.calendarMonth = new Date(state.calendarMonth.getFullYear(), state.calendarMonth.getMonth() - 1, 1);
+    fetchCalendar();
+  });
+  document.getElementById("calendar-next").addEventListener("click", () => {
+    state.calendarMonth = new Date(state.calendarMonth.getFullYear(), state.calendarMonth.getMonth() + 1, 1);
+    fetchCalendar();
+  });
+  document.getElementById("calendar-page-prev").addEventListener("click", () => {
+    if (state.calendarPage > 1) { state.calendarPage -= 1; fetchCalendar(); }
+  });
+  document.getElementById("calendar-page-next").addEventListener("click", () => {
+    if (state.calendarPage < state.calendarTotalPages) { state.calendarPage += 1; fetchCalendar(); }
+  });
+  document.getElementById("meeting-page-prev").addEventListener("click", () => {
+    if (state.meetingPage > 1) { state.meetingPage -= 1; fetchMeetingEmails(); }
+  });
+  document.getElementById("meeting-page-next").addEventListener("click", () => {
+    if (state.meetingPage < state.meetingTotalPages) { state.meetingPage += 1; fetchMeetingEmails(); }
+  });
+  checkCalendarReminders();
+  setInterval(checkCalendarReminders, 60_000);
 
   document.querySelectorAll(".chip").forEach((chip) => {
     chip.addEventListener("click", () => sendAssistantCommand(chip.dataset.prompt));
@@ -721,6 +1173,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const res = await apiFetch("/api/emails/sync/", { method: "POST" });
     showToast(`Synced ${res.added || 0} new email(s)`);
     fetchEmails();
+    checkMeetingSuggestions();
   });
 
   document.getElementById("btn-disconnect-gmail").addEventListener("click", async () => {

@@ -1,10 +1,11 @@
 import json
+import re
 from typing import Any, Dict, List
 
 from django.conf import settings
 
 from accounts.models import MailAccount
-from assistant.services.fallback_nlu import get_client_tz, run_fallback_nlu
+from assistant.services.fallback_nlu import get_client_tz, is_local_ui_intent, run_fallback_nlu
 from assistant.services.tools import (
     execute_close_email_tool,
     execute_compose_tool,
@@ -289,7 +290,9 @@ def _build_context_summary(account: MailAccount, ui_context: Dict[str, Any]) -> 
     client_tz = get_client_tz(ui_context)
     local_now = timezone.now().astimezone(client_tz)
     current_view = ui_context.get("current_view", "inbox")
-    open_email_id = ui_context.get("open_email_id")
+    open_email_id = ui_context.get("open_email_id") or (
+        ui_context.get("chat_context") or {}
+    ).get("open_email_id")
     parts = [
         f"User local time: {local_now.isoformat()}",
         f"Current UI view: {current_view}",
@@ -303,16 +306,49 @@ def _build_context_summary(account: MailAccount, ui_context: Dict[str, Any]) -> 
             )
     if ui_context.get("active_filters"):
         parts.append(f"Active filters: {json.dumps(ui_context['active_filters'])}")
+    compose_draft = ui_context.get("compose_draft") or {}
+    if compose_draft:
+        parts.append(
+            "Current compose draft: "
+            + json.dumps(
+                {
+                    "to": compose_draft.get("to", ""),
+                    "subject": compose_draft.get("subject", ""),
+                    "body": (compose_draft.get("body", "") or "")[:1200],
+                }
+            )
+        )
+    if ui_context.get("chat_context"):
+        parts.append(f"Recent context in this chat: {json.dumps(ui_context['chat_context'], default=str)[:1800]}")
     contacts = list(Contact.objects.filter(account=account).values_list("name", "email")[:20])
     if contacts:
         parts.append("Known contacts: " + ", ".join(f"{n} <{e}>" for n, e in contacts))
     return "\n".join(parts)
 
 
+def _history_turn_content(turn: Dict[str, Any]) -> str:
+    content = turn.get("content", "")
+    context = turn.get("context") or {}
+    if turn.get("role") != "user" or not isinstance(context, dict):
+        return content
+    compact_context = {
+        key: context[key]
+        for key in ("current_view", "open_email_id", "active_filters", "compose_draft")
+        if context.get(key)
+    }
+    if compact_context:
+        return f"{content}\n[UI context for this message: {json.dumps(compact_context, default=str)[:1800]}]"
+    return content
+
+
 def _execute_tool(
     account: MailAccount, name: str, args: Dict[str, Any], ui_context: Dict[str, Any]
 ) -> Dict[str, Any]:
-    open_id = args.get("email_id") or ui_context.get("open_email_id")
+    open_id = (
+        args.get("email_id")
+        or ui_context.get("open_email_id")
+        or (ui_context.get("chat_context") or {}).get("open_email_id")
+    )
     if name == "compose_email":
         return execute_compose_tool(
             to=args.get("to", ""),
@@ -435,9 +471,9 @@ def _run_openai_agent(
         + _build_context_summary(account, ui_context)
     )
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    for turn in (history or [])[-6:]:
+    for turn in (history or [])[-24:]:
         if turn.get("role") in ("user", "assistant") and turn.get("content"):
-            messages.append({"role": turn["role"], "content": turn["content"]})
+            messages.append({"role": turn["role"], "content": _history_turn_content(turn)})
     messages.append({"role": "user", "content": message})
 
     ctx = dict(ui_context)
@@ -520,10 +556,10 @@ def _run_gemini_agent(
     )
 
     contents: List[Any] = []
-    for turn in (history or [])[-6:]:
+    for turn in (history or [])[-24:]:
         role = "model" if turn.get("role") == "assistant" else "user"
         if turn.get("content"):
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=turn["content"])]))
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=_history_turn_content(turn))]))
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text=message)]))
 
     ctx = dict(ui_context)
@@ -587,14 +623,51 @@ def process_assistant_command(
     ui_context: Dict[str, Any],
     history: List[Dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
-    if settings.GEMINI_API_KEY:
-        try:
-            return _run_gemini_agent(account, message, ui_context, history or [])
-        except Exception:
-            pass
-    if settings.OPENAI_API_KEY:
-        try:
-            return _run_openai_agent(account, message, ui_context, history or [])
-        except Exception:
-            pass
-    return run_fallback_nlu(account, message, ui_context)
+    # Navigation, filtering and other deterministic UI controls do not need a
+    # provider call. Language work (drafting, rewriting, summarizing) does.
+    if is_local_ui_intent(message, history or []):
+        result = run_fallback_nlu(account, message, ui_context, history=history or [])
+        result.setdefault("agent_steps", []).insert(0, "Handled locally (no AI API call)")
+        return result
+    # These target-specific Sent actions need recipient-aware lookup, which
+    # the generic LLM tools do not currently expose.
+    if re.search(
+        r"\b(?:star|unstar|open|show)\b.*\b(?:latest|last|most recent)\b.*\bsent\b",
+        message,
+        re.IGNORECASE,
+    ):
+        return run_fallback_nlu(account, message, ui_context, history=history or [])
+    if (
+        ui_context.get("compose_draft")
+        or (ui_context.get("chat_context") or {}).get("compose_draft")
+    ) and re.search(
+        r"\b(?:edit|rewrite|revise|rephrase|romanticize|romanticise|reword)\b|\bmake\s+(?:it|this)\b",
+        message,
+        re.IGNORECASE,
+    ):
+        return run_fallback_nlu(account, message, ui_context, history=history or [])
+    provider = settings.AI_PROVIDER
+    api_key = settings.OPENAI_API_KEY if provider == "openai" else settings.GEMINI_API_KEY
+    provider_name = "OpenAI" if provider == "openai" else "Gemini"
+    if not api_key:
+        return {
+            "reply": f"{provider_name} is selected, but its API key is missing. Set the matching key in .env and restart Jarvis.",
+            "ui_actions": [], "rich_cards": [],
+            "agent_steps": [f"Selected provider: {provider_name}", "Missing API key"],
+        }
+    try:
+        result = (
+            _run_openai_agent(account, message, ui_context, history or [])
+            if provider == "openai"
+            else _run_gemini_agent(account, message, ui_context, history or [])
+        )
+        result["agent_steps"] = [f"Used {provider_name}"] + (result.get("agent_steps") or [])
+        return result
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        detail = f" (HTTP {status})" if status else ""
+        return {
+            "reply": f"The selected {provider_name} request failed{detail}. Check its API key, model, and network connection. No other provider was tried.",
+            "ui_actions": [], "rich_cards": [],
+            "agent_steps": [f"Selected provider: {provider_name}", "Provider request failed"],
+        }

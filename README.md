@@ -51,11 +51,11 @@ python manage.py runserver
 Open **http://127.0.0.1:8000/** in your browser. It runs immediately in **Demo Mode** with realistic seeded threads and full AI UI control.
 
 ### 3. Optional: Connect Real Gmail (OAuth2 + Pub/Sub) & LLM
-Edit `.env` to enable live Gmail and/or OpenAI tool calling:
+Edit `.env` to enable live Gmail and choose one AI provider:
 
 - **Gmail OAuth2**: Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI=http://127.0.0.1:8000/auth/google/callback/`. Click **Connect Gmail** in the left rail.
 - **Gmail Pub/Sub Push**: Set `GMAIL_PUBSUB_TOPIC=projects/<project>/topics/<topic>` and `GMAIL_WEBHOOK_TOKEN`. Point your Pub/Sub push subscription to `https://<your-domain>/api/webhooks/gmail/?token=<token>`.
-- **OpenAI Tool Calling**: Set `OPENAI_API_KEY` (defaults to `gpt-4o-mini`). Without an API key, Jarvis uses a built-in deterministic NLU parser so all core commands work offline.
+- **AI provider**: Set `AI_PROVIDER=openai` or `AI_PROVIDER=gemini`, then set the matching `OPENAI_API_KEY` or `GEMINI_API_KEY`. Models default to `gpt-4o-mini` and `gemini-3.8-flash`; override them with `OPENAI_MODEL` or `GEMINI_MODEL`. Restart Jarvis after changing `.env`. Jarvis uses only the selected provider and reports its errors without trying the other provider. Deterministic UI controls such as navigation and filters still run locally.
 
 ### 4. Run Automated Tests
 
@@ -76,8 +76,8 @@ pytest -v
 3. **Real-Time Sync via Pub/Sub Webhook + SSE**:
    - We chose **Server-Sent Events (SSE)** (`StreamingHttpResponse` + in-process `RealtimeBroker`) over Django Channels + Redis.
    - **Trade-off**: SSE requires zero extra infrastructure (no Redis broker) and works out of the box on single-instance deployments (Render/Railway). For multi-worker horizontal scaling, `RealtimeBroker` would be swapped for Redis Pub/Sub.
-4. **Dual-Engine AI (LLM Tool Calling + Deterministic NLU Fallback)**:
-   - Uses OpenAI function calling when `OPENAI_API_KEY` is present, with automatic fallback to `fallback_nlu.py`. This guarantees zero-config reliability for evaluators and automated tests.
+4. **Selectable AI provider (LLM Tool Calling + Deterministic UI Controls)**:
+   - `AI_PROVIDER` selects OpenAI or Gemini for language tasks. UI-only actions run through the local NLU without calling either API.
 
 ---
 

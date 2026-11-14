@@ -14,6 +14,7 @@ from assistant.services.tools import (
     execute_open_email_tool,
     execute_read_email_detail,
     execute_reply_open_email,
+    execute_rewrite_compose_tool,
     execute_save_contact_tool,
     execute_save_draft_tool,
     execute_schedule_tool,
@@ -21,6 +22,8 @@ from assistant.services.tools import (
     execute_star_open_email,
     execute_sync_now_tool,
 )
+from mail.models import EmailMessage
+from mail.services.contacts import resolve_recipient
 from mail.services.queries import query_emails
 
 
@@ -29,6 +32,39 @@ def get_client_tz(ui_context: Dict[str, Any]):
     if isinstance(offset, (int, float)):
         return dt_timezone(timedelta(minutes=-int(offset)))
     return timezone.get_current_timezone()
+
+
+def is_local_ui_intent(message: str, history: Optional[list] = None) -> bool:
+    """Route deterministic mail UI controls locally instead of calling an LLM."""
+    text = (message or "").strip()
+    lower = text.lower()
+    if _merge_pending_schedule_followup(text, history or []):
+        return True
+    if re.search(r"\b(?:summari[sz]e|rewrite|rephrase|romanticize|romanticise|make it more)\b", lower):
+        return False
+    if re.search(r"\b(?:schedule|scheduled)\b.*\b(?:mail|email|message|send)\b", lower):
+        return True
+    if re.fullmatch(r"(?:close(?:\s+(?:this|it|email|mail|the\s+open\s+(?:email|mail)|detail))?|go\s+back)", lower):
+        return True
+    if any(term in lower for term in ("dark mode", "dark theme", "light mode", "light theme", "sync mail", "refresh inbox")):
+        return True
+    if re.fullmatch(r"(?:open\s+|show\s+|go\s+to\s+)?contacts(?:\s+book)?", lower):
+        return True
+    if re.fullmatch(r"(?:send\s+it|send\s+now|confirm\s+send|yes\s+send|discard|cancel\s+compose|clear\s+compose)", lower):
+        return True
+    if re.search(r"\b(?:star|unstar|mark\s+(?:this\s+)?(?:as\s+)?(?:read|unread)|move\s+to|spam\s+this|not\s+spam|restore|trash\s+this|delete\s+this)\b", lower):
+        return True
+    if re.search(r"\b(?:open|show|go\s+to)\b", lower) and any(
+        term in lower for term in ("inbox", "sent", "draft", "starred", "spam", "bin", "trash", "scheduled", "latest", "newest", "recent", "email", "mail", "message", "contacts")
+    ):
+        return True
+    if re.search(r"\b(?:show|find|search|filter|clear|reset)\b", lower) and any(
+        term in lower for term in ("email", "mail", "inbox", "sent", "unread", "read", "from", "subject")
+    ):
+        return True
+    if re.search(r"\b(?:save|add)\s+contact\b|\bremember\b.*@", lower):
+        return True
+    return False
 
 MONTH_MAP = {
     "jan": 1, "january": 1,
@@ -64,7 +100,7 @@ def _parse_compose(message: str) -> Optional[Dict[str, str]]:
         to_addr = email_match.group(0)
     else:
         name_match = re.search(
-            r"\bto\s+([A-Za-z][A-Za-z0-9 .'-]{0,40}?)(?=\s*(?:,|$|\s+(?:with\s+subject|subject|about|regarding|with\s+body|body|saying|message|asking|telling|reminding|thanking|inviting|for|to\s+ask|to\s+tell)\b))",
+            r"\bto\s+([A-Za-z][A-Za-z0-9 .'-]{0,40}?)(?=\s*(?:,|$|\s+(?:at|by|on|today|tomorrow|in\s+\d+|with\s+subject|subject|about|regarding|with\s+body|body|saying|message|asking|telling|reminding|thanking|inviting|for|to\s+ask|to\s+tell)\b))",
             message,
             re.IGNORECASE,
         )
@@ -93,7 +129,7 @@ def _parse_compose(message: str) -> Optional[Dict[str, str]]:
 
     body = ""
     body_match = re.search(
-        r"(?:and\s+)?(?:body|saying|message)\s*[:=]?\s*(?:'([^']*)'|\"([^\"]*)\"|\u2018([^\u2019]*)\u2019|\u201c([^\u201d]*)\u201d|(.+))$",
+        r"(?:and\s+)?(?:body|message)\s*[:=]?\s*(?:'([^']*)'|\"([^\"]*)\"|\u2018([^\u2019]*)\u2019|\u201c([^\u201d]*)\u201d|(.+))$|\bsaying\s*[:=]?\s*('([^']*)'|\"([^\"]*)\"|\u2018([^\u2019]*)\u2019|\u201c([^\u201d]*)\u201d)$",
         message,
         re.IGNORECASE | re.DOTALL,
     )
@@ -103,7 +139,7 @@ def _parse_compose(message: str) -> Optional[Dict[str, str]]:
     intent = ""
     if not subject or not body:
         m_intent = re.search(
-            r"(?:,\s*|(?:\b(?:asking|telling|reminding|thanking|inviting|regarding|about)\b).*)$",
+            r"(?:,\s*|(?:\b(?:asking|telling|saying|reminding|thanking|inviting|regarding|about)\b).*)$",
             message,
             re.IGNORECASE,
         )
@@ -133,6 +169,8 @@ def _parse_schedule_datetime(text: str, client_tz=None) -> Optional[str]:
     base_date = now.date()
     if "tomorrow" in lower:
         base_date = base_date + timedelta(days=1)
+    elif "today" in lower:
+        base_date = now.date()
     else:
         d_from, _ = _parse_specific_date(lower)
         if d_from:
@@ -162,7 +200,12 @@ def _parse_schedule_datetime(text: str, client_tz=None) -> Optional[str]:
     if not m_time and not any(k in lower for k in ("tomorrow", "today", "morning", "afternoon", "evening", "tonight")) and not _parse_specific_date(lower)[0]:
         return None
 
-    dt = datetime(base_date.year, base_date.month, base_date.day, hour, minute, tzinfo=tz)
+    try:
+        dt = datetime(base_date.year, base_date.month, base_date.day, hour, minute, tzinfo=tz)
+    except ValueError:
+        return None
+    if dt <= now:
+        return None
     return dt.isoformat()
 
 
@@ -224,6 +267,69 @@ def _parse_specific_date(lower: str) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _sent_recipient_phrase(text: str) -> str:
+    match = re.search(
+        r"\b(?:sent|send|message|email)\s+to\s+(.+?)(?=\s+(?:about|regarding|with|on|today|yesterday|last|latest|and\s+then)\b|[,.!?;]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    return match.group(1).strip(" \t\r\n'\"`") if match else ""
+
+
+def _find_latest_sent_message(account: MailAccount, recipient: str = "") -> Optional[EmailMessage]:
+    qs = EmailMessage.objects.filter(account=account, folder=EmailMessage.FOLDER_SENT)
+    recipient = (recipient or "").strip()
+    if recipient:
+        email_addr = recipient if "@" in recipient else resolve_recipient(account, recipient)[0]
+        if email_addr:
+            qs = qs.filter(recipient_email__icontains=email_addr)
+        else:
+            qs = qs.filter(recipient_email__icontains=recipient)
+    return qs.order_by("-received_at", "-id").first()
+
+
+def _merge_pending_schedule_followup(message: str, history: list) -> Optional[str]:
+    """Rebuild a schedule request when the user answers a clarification prompt."""
+    if not history or re.search(r"\b(?:schedule|scheduled)\b", message, re.IGNORECASE):
+        return None
+
+    latest_assistant = next(
+        (item.get("content", "") for item in reversed(history)
+         if item.get("role") == "assistant" and item.get("content")),
+        "",
+    )
+    if not re.search(r"schedule it for|when should i schedule|choose a future time|please tell me", latest_assistant, re.IGNORECASE):
+        return None
+
+    # Let a natural-language answer fill the requested body, while keeping
+    # unrelated UI commands ("show unread mail", "open Sent") independent.
+    content_prompt = bool(re.search(r"what the email should say|what.*(?:email|mail).*(?:say|contain)", latest_assistant, re.IGNORECASE))
+    if re.match(r"\s*(?:show|open|go to|find|search|filter|star|unstar|mark|close|switch|sync|refresh)\b", message, re.IGNORECASE):
+        return None
+    if not content_prompt and not re.search(r"\bto\b|\b(?:at|by|today|tomorrow|tonight|morning|afternoon|evening)\b|@|\b(?:asking|saying|subject|body|about|remind|invite|thank)\b", message, re.IGNORECASE):
+        return None
+
+    schedule_index = None
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
+        if item.get("role") == "user" and re.search(r"\b(?:schedule|scheduled)\b", item.get("content", ""), re.IGNORECASE):
+            schedule_index = index
+            break
+    if schedule_index is None:
+        return None
+
+    pieces = [history[schedule_index].get("content", "")]
+    pieces.extend(
+        item.get("content", "") for item in history[schedule_index + 1:]
+        if item.get("role") == "user" and item.get("content")
+    )
+    if content_prompt and not re.search(r"\b(?:body|message|saying|say|write|tell)\b", message, re.IGNORECASE):
+        pieces.append(f'with body "{message.strip()}"')
+    else:
+        pieces.append(message)
+    return " ".join(piece.strip() for piece in pieces if piece.strip())
+
+
 def _parse_sender(message: str) -> Optional[str]:
     m = re.search(
         r"\bfrom\s+([A-Za-z0-9_.+-]+(?:@[A-Za-z0-9.-]+)?)(?=\s+(?:about|regarding|with|from|on|in|this|last|today|yesterday|$))",
@@ -258,7 +364,24 @@ def _run_single_step(
 ) -> Dict[str, Any]:
     text = message.strip()
     lower = text.lower()
-    open_email_id = ui_context.get("open_email_id")
+    open_email_id = ui_context.get("open_email_id") or (
+        ui_context.get("chat_context") or {}
+    ).get("open_email_id")
+
+    if re.search(
+        r"\b(?:edit|rewrite|revise|rephrase|romanticize|romanticise|reword)\b|\bmake\s+(?:it|this)\b",
+        lower,
+    ):
+        draft = ui_context.get("compose_draft") or (
+            ui_context.get("chat_context") or {}
+        ).get("compose_draft") or {}
+        if draft:
+            return execute_rewrite_compose_tool(
+                to=draft.get("to", ""),
+                subject=draft.get("subject", ""),
+                body=draft.get("body", ""),
+                instruction=text,
+            )
 
     # Close the open email
     if re.fullmatch(r"(?:close(?:\s+(?:this|it|email|mail|the\s+open\s+(?:email|mail)|detail))?|go\s+back)", lower):
@@ -280,25 +403,61 @@ def _run_single_step(
     if re.fullmatch(r"(?:open\s+|show\s+|go\s+to\s+)?contacts(?:\s+book)?", lower):
         return {"reply": "Opened your Contact Book.", "ui_actions": [{"type": "navigate_view", "view": "contacts"}], "rich_cards": []}
 
-    # Schedule a mail (e.g. "schedule a mail to shibhi by 6 pm today, asking him out for dinner tonight")
-    if re.search(r"\bschedule\b", lower) and any(k in lower for k in ("mail", "email", "message")):
+    # Handle scheduling before generic search/filter intents. A schedule request
+    # can be incomplete (for example, "schedule a mail at 8pm today"); don't
+    # silently reinterpret it as an inbox search when the recipient is missing.
+    if re.search(r"\b(?:schedule|scheduled)\b", lower) and any(
+        k in lower for k in ("mail", "email", "message", "send")
+    ):
         client_tz = get_client_tz(ui_context)
-        m_to = re.search(
-            r"\bto\s+([A-Za-z0-9_.+-]+(?:@[A-Za-z0-9.-]+)?)(?=\s+(?:at|by|on|for|today|tomorrow|with|about|,|$))",
-            text,
-            re.IGNORECASE,
-        )
-        to_val = m_to.group(1).strip() if m_to else ""
+        parsed = _parse_compose(text) or {"to": "", "subject": "", "body": "", "intent": ""}
+        compose_draft = ui_context.get("compose_draft") or (ui_context.get("chat_context") or {}).get("compose_draft") or {}
+        draft_to = (compose_draft.get("to") or "").strip()
+        to_val = (parsed.get("to") or "").strip() or draft_to
+        if parsed.get("to") and "@" not in parsed["to"] and draft_to:
+            draft_local = draft_to.split("@", 1)[0].casefold()
+            requested_name = parsed["to"].strip().casefold().replace(" ", "")
+            if requested_name and requested_name in draft_local.replace(".", "").replace("_", ""):
+                to_val = draft_to
+        subject_val = (parsed.get("subject") or "").strip() or (compose_draft.get("subject") or "").strip()
+        body_val = (parsed.get("body") or "").strip() or (compose_draft.get("body") or "").strip()
         sched_iso = _parse_schedule_datetime(text, client_tz=client_tz)
-        parsed = _parse_compose(text) or {"subject": "", "body": "", "intent": ""}
+        if not sched_iso:
+            if re.search(r"\b(?:at|by)\s+\d|\b(?:today|tomorrow|tonight|morning|afternoon|evening)\b", lower):
+                return {
+                    "reply": "That send time is earlier than now or I couldn't parse it. Please choose a future time, such as ‘tomorrow at 8pm’.",
+                    "ui_actions": [],
+                    "rich_cards": [],
+                    "agent_steps": ["Recognized a scheduling request", "Requested a valid future send time"],
+                }
+            return {
+                "reply": "When should I schedule the email? Please give me a time, such as ‘8pm today’ or ‘tomorrow at 9am’.",
+                "ui_actions": [],
+                "rich_cards": [],
+                "agent_steps": ["Recognized a scheduling request", "Asked for a send time"],
+            }
+        missing = []
+        if not to_val:
+            missing.append("who to send it to")
+        if not body_val and not parsed.get("intent"):
+            missing.append("what the email should say")
+        if missing:
+            local_dt = datetime.fromisoformat(sched_iso)
+            when = local_dt.strftime("%I:%M %p today" if local_dt.date() == timezone.now().astimezone(client_tz).date() else "%Y-%m-%d %I:%M %p").lstrip("0")
+            return {
+                "reply": f"I can schedule it for {when}. Please tell me { ' and '.join(missing) }.",
+                "ui_actions": [],
+                "rich_cards": [],
+                "agent_steps": ["Recognized a scheduling request", "Asked for missing email details"],
+            }
         if to_val and sched_iso:
             return execute_schedule_tool(
                 account,
                 to=to_val,
-                subject=parsed.get("subject", ""),
-                body=parsed.get("body", ""),
+                subject=subject_val,
+                body=body_val,
                 scheduled_at=sched_iso,
-                intent=parsed.get("intent") or text,
+                intent=parsed.get("intent") or None,
                 client_tz=client_tz,
             )
 
@@ -363,6 +522,24 @@ def _run_single_step(
                 flags=re.IGNORECASE,
             ).strip(" .:-")
             return execute_save_contact_tool(account, name=name_part, email=email_addr)
+
+    # Resolve actions that refer to the latest message in Sent, even when that
+    # message is not already open in the detail pane.
+    if re.search(r"\b(?:star|unstar)\b", lower) and "sent" in lower and any(
+        word in lower for word in ("latest", "last", "most recent")
+    ):
+        recipient = _sent_recipient_phrase(text)
+        target = _find_latest_sent_message(account, recipient)
+        if not target:
+            return {"reply": "I couldn't find a matching message in Sent.", "ui_actions": [], "rich_cards": []}
+        opened = execute_open_email_tool(account, email_id=target.id)
+        starred = execute_star_open_email(account, target.id, starred=not bool(re.search(r"\bunstar\b", lower)))
+        return {
+            "reply": f"{starred.get('reply', 'Updated the message.')} Opened **{target.subject}** from Sent.",
+            "ui_actions": opened.get("ui_actions", []) + starred.get("ui_actions", []),
+            "rich_cards": opened.get("rich_cards", []),
+            "agent_steps": ["Found the latest matching sent message", "Opened it", "Updated its star"],
+        }
 
     # 1. Reply to currently open email
     if re.search(r"\breply\b", lower):
@@ -431,18 +608,28 @@ def _run_single_step(
     if any(k in lower for k in ("clear filter", "reset filter", "show all email", "all emails")):
         return execute_search_tool(account, folder="inbox")
 
-    # 5. Open specific email (latest mail, by sender, by date, or by keyword)
-    if re.search(r"\bopen\b", lower) and not any(v in lower for v in ("inbox", "sent", "compose", "contacts")):
+    # Open the message already selected in the UI when the user says "open it".
+    if re.fullmatch(r"(?:open|show)\s+(?:it|this|that|this email|this message)", lower) and open_email_id:
+        return execute_open_email_tool(account, email_id=open_email_id)
+
+    # 5. Open a specific email, including the latest message in Sent.
+    if re.search(r"\bopen\b", lower) and not any(v in lower for v in ("inbox", "compose", "contacts")):
         sender = _parse_sender(text)
         q = _parse_about_keyword(text)
         date_from, date_to = _parse_specific_date(lower)
         days = _parse_days(lower)
         is_latest = any(w in lower for w in ("latest", "newest", "recent", "last mail", "last email"))
+        if "sent" in lower and is_latest:
+            target = _find_latest_sent_message(account, _sent_recipient_phrase(text))
+            if not target:
+                return {"reply": "I couldn't find a matching message in Sent.", "ui_actions": [], "rich_cards": []}
+            return execute_open_email_tool(account, email_id=target.id)
         if sender or q or date_from or days or is_latest:
             return execute_open_email_tool(
                 account,
                 sender=sender,
                 q=q,
+                folder="sent" if "sent" in lower else None,
                 days=days,
                 date_from=date_from,
                 date_to=date_to,
@@ -507,9 +694,15 @@ def _run_single_step(
 
 
 def run_fallback_nlu(
-    account: MailAccount, message: str, ui_context: Dict[str, Any]
+    account: MailAccount, message: str, ui_context: Dict[str, Any], history: Optional[list] = None
 ) -> Dict[str, Any]:
     """Agentic multi-step NLU planner: splits compound instructions and chains context."""
+    pending_schedule = _merge_pending_schedule_followup(message, history or [])
+    if pending_schedule:
+        result = _run_single_step(account, pending_schedule, ui_context)
+        result.setdefault("agent_steps", ["Continued the pending scheduling request"])
+        return result
+
     parts = [
         p.strip()
         for p in re.split(r"\s*(?:,\s*and\s+then\s+|\s+and\s+then\s+|;\s*|\s+then\s+|\s*,\s*and\s+(?=(?:open|reply|forward|star|move|summarize|summarise|send|draft|save)\b))", message, flags=re.IGNORECASE)

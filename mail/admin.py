@@ -1,5 +1,5 @@
 from django.contrib import admin
-from mail.models import Contact, EmailMessage
+from mail.models import CalendarEvent, Contact, EmailMessage
 
 
 @admin.register(EmailMessage)
@@ -13,3 +13,10 @@ class EmailMessageAdmin(admin.ModelAdmin):
 class ContactAdmin(admin.ModelAdmin):
     list_display = ("name", "email", "account", "updated_at")
     search_fields = ("name", "email")
+
+
+@admin.register(CalendarEvent)
+class CalendarEventAdmin(admin.ModelAdmin):
+    list_display = ("title", "account", "start_at", "reminder_minutes", "source_email")
+    list_filter = ("all_day", "reminder_acknowledged")
+    search_fields = ("title", "description")

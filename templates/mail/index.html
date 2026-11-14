@@ -38,6 +38,12 @@
         <button id="nav-scheduled" class="nav-item" data-folder="scheduled">
           <span>Scheduled</span>
         </button>
+        <button id="nav-meetings" class="nav-item" data-view="meetings">
+          <span>Meeting Emails</span>
+        </button>
+        <button id="nav-calendar" class="nav-item" data-view="calendar">
+          <span>Calendar</span>
+        </button>
         <button id="nav-spam" class="nav-item" data-folder="spam">
           <span>Spam</span>
         </button>
@@ -71,6 +77,10 @@
 
     <!-- Main Mail Workspace -->
     <main class="main-workspace">
+      <div id="meeting-approval-banner" class="meeting-approval-banner hidden">
+        <div><strong id="meeting-approval-title">Meeting detected</strong><div id="meeting-approval-time" class="muted"></div></div>
+        <div class="meeting-approval-actions"><button id="meeting-approval-add" class="btn btn-sm btn-primary" type="button">Review &amp; add</button><button id="meeting-approval-dismiss" class="btn btn-sm btn-ghost" type="button">Dismiss</button></div>
+      </div>
       <header class="filter-bar">
         <input id="filter-q" type="search" class="input" placeholder="Search subject, body, sender..." />
         <input id="filter-sender" type="text" class="input input-sm" placeholder="Sender..." />
@@ -96,6 +106,11 @@
           <span id="list-count" class="muted">0 emails</span>
         </div>
         <div id="email-list" class="email-list"></div>
+        <div class="pagination-controls">
+          <button id="btn-page-prev" class="btn btn-sm btn-outline" type="button">Previous</button>
+          <span id="page-status" class="muted">Page 1 of 1</span>
+          <button id="btn-page-next" class="btn btn-sm btn-outline" type="button">Next</button>
+        </div>
       </section>
 
       <!-- Detail & Thread View -->
@@ -121,6 +136,7 @@
           <h2 id="compose-title">New Message</h2>
           <button id="btn-discard-compose" class="btn btn-sm btn-ghost">Discard</button>
         </div>
+        <p class="muted" style="margin:0 0 10px;">Review and edit any field before sending. You can also ask Jarvis to rewrite the draft.</p>
         <form id="compose-form" class="compose-form">
           <label class="field">
             <span>To</span>
@@ -158,15 +174,57 @@
         </form>
         <div id="contacts-list" class="email-list"></div>
       </section>
+
+      <section id="view-meetings" class="workspace-view">
+        <div class="view-header"><h2>Meeting Emails</h2><span id="meeting-count" class="muted"></span></div>
+        <p class="muted">Meeting and schedule emails are sorted by the date or time they mention. Review each one before adding it to your calendar.</p>
+        <div id="meeting-email-list" class="meeting-email-list"></div>
+        <div class="pagination-controls">
+          <button id="meeting-page-prev" class="btn btn-sm btn-outline" type="button">Previous</button>
+          <span id="meeting-page-status" class="muted">Page 1 of 1</span>
+          <button id="meeting-page-next" class="btn btn-sm btn-outline" type="button">Next</button>
+        </div>
+      </section>
+
+      <section id="view-calendar" class="workspace-view">
+        <div class="calendar-toolbar">
+          <div class="calendar-mode-switch"><button id="calendar-list-mode" class="btn btn-sm btn-primary" type="button">Events</button><button id="calendar-month-mode" class="btn btn-sm btn-outline" type="button">Month</button></div>
+          <div id="calendar-month-navigation" class="calendar-month-navigation"><button id="calendar-prev" class="btn btn-sm btn-outline" type="button">Previous</button><h2 id="calendar-month-title"></h2><button id="calendar-next" class="btn btn-sm btn-outline" type="button">Next</button></div>
+          <button id="calendar-add-event" class="btn btn-sm btn-primary" type="button">+ Add event</button>
+        </div>
+        <form id="calendar-add-form" class="calendar-add-form hidden">
+          <label class="field"><span>Event</span><input id="calendar-event-title" class="input" required maxlength="500" placeholder="Meeting title" /></label>
+          <label class="field"><span>Date and time</span><input id="calendar-event-start" class="input" type="datetime-local" required /></label>
+          <label class="field"><span>Reminder</span><select id="calendar-event-reminder" class="select"><option value="0">At event time</option><option value="5">5 minutes before</option><option value="15" selected>15 minutes before</option><option value="30">30 minutes before</option><option value="60">1 hour before</option></select></label>
+          <button class="btn btn-primary" type="submit">Review &amp; save</button><button id="calendar-cancel-add" class="btn btn-outline" type="button">Cancel</button>
+        </form>
+        <div class="calendar-layout">
+          <div id="calendar-events-list" class="calendar-events-list"></div>
+          <div id="calendar-month-view" class="calendar-month-view hidden">
+            <div class="calendar-weekdays"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+            <div id="calendar-grid" class="calendar-grid"></div>
+          </div>
+          <aside id="calendar-email-panel" class="calendar-email-panel"><div class="calendar-empty">Choose an event to view its related email here.</div></aside>
+        </div>
+        <div id="calendar-list-pagination" class="pagination-controls">
+          <button id="calendar-page-prev" class="btn btn-sm btn-outline" type="button">Previous</button><span id="calendar-page-status" class="muted">Page 1 of 1</span><button id="calendar-page-next" class="btn btn-sm btn-outline" type="button">Next</button>
+        </div>
+      </section>
     </main>
 
     <!-- Right AI Assistant Panel -->
     <aside class="assistant-panel">
       <div class="assistant-header">
-        <div>
+        <div class="assistant-header-main">
           <div class="assistant-title">Jarvis Co-Pilot</div>
           <div id="assistant-context-pill" class="context-pill">Context: Inbox</div>
         </div>
+        <button id="btn-new-chat" class="btn btn-sm btn-outline">New chat</button>
+      </div>
+
+      <div class="assistant-history-wrap">
+        <div class="assistant-history-label">Recent chats</div>
+        <div id="assistant-chat-history" class="assistant-chat-history"></div>
       </div>
 
       <div class="quick-prompts">

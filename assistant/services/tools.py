@@ -1,7 +1,8 @@
 from typing import Any, Dict, List, Optional
 
+from django.conf import settings
 from accounts.models import MailAccount
-from assistant.services.drafter import generate_subject_and_body
+from assistant.services.drafter import generate_subject_and_body, revise_email_draft
 from mail.models import EmailMessage
 from mail.services.contacts import resolve_recipient, upsert_contact
 from mail.services.queries import query_emails
@@ -72,6 +73,40 @@ def execute_compose_tool(
         "rich_cards": [
             {"type": "send_confirmation", "draft": draft},
         ],
+    }
+
+
+def execute_rewrite_compose_tool(
+    *, to: str, subject: str, body: str, instruction: str
+) -> Dict[str, Any]:
+    if not (to or subject or body):
+        return {
+            "reply": "There isn't an open email draft to edit. Open Compose or ask me to draft an email first.",
+            "ui_actions": [],
+            "rich_cards": [],
+        }
+    try:
+        revised_subject, revised_body = revise_email_draft(subject, body, instruction)
+    except Exception as exc:
+        provider_name = "OpenAI" if settings.AI_PROVIDER == "openai" else "Gemini"
+        return {
+            "reply": f"{provider_name} couldn't revise the draft, so your current draft is unchanged. {exc}",
+            "ui_actions": [],
+            "rich_cards": [],
+            "agent_steps": [f"Selected provider: {provider_name}", "Draft revision failed"],
+        }
+    return {
+        "reply": "I revised the draft with AI. You can edit the To, Subject, and Message fields before sending.",
+        "ui_actions": [
+            {
+                "type": "update_compose_draft",
+                "to": to,
+                "subject": revised_subject,
+                "body": revised_body,
+            }
+        ],
+        "rich_cards": [],
+        "agent_steps": [f"Revised draft with {settings.AI_PROVIDER.title()}"],
     }
 
 
@@ -375,7 +410,6 @@ def execute_schedule_tool(
     intent: Optional[str] = None,
     client_tz=None,
 ) -> Dict[str, Any]:
-    import uuid
     from datetime import datetime
     from django.utils import timezone
 
@@ -395,7 +429,15 @@ def execute_schedule_tool(
     final_subject = (subject or "").strip()
     final_body = (body or "").strip()
     if intent and (not final_subject or not final_body):
-        ai_subj, ai_body = generate_subject_and_body(contact_name, intent)
+        try:
+            ai_subj, ai_body = generate_subject_and_body(contact_name, intent)
+        except Exception as exc:
+            provider_name = "OpenAI" if settings.AI_PROVIDER == "openai" else "Gemini"
+            return {
+                "reply": f"{provider_name} couldn't draft the scheduled email. {exc}",
+                "ui_actions": [], "rich_cards": [],
+                "agent_steps": [f"Selected provider: {provider_name}", "Email drafting failed"],
+            }
         if not final_subject:
             final_subject = ai_subj
         if not final_body:
@@ -412,35 +454,17 @@ def execute_schedule_tool(
             "rich_cards": [],
         }
 
-    msg = EmailMessage.objects.create(
-        account=account,
-        provider_message_id=f"sched-{uuid.uuid4().hex[:10]}",
-        thread_id=f"thread-{uuid.uuid4().hex[:10]}",
-        folder=EmailMessage.FOLDER_SCHEDULED,
-        sender_name=account.display_name or "Me",
-        sender_email=account.email,
-        recipient_email=resolved_to,
-        subject=final_subject or "(No subject)",
-        snippet=" ".join(final_body.split())[:140],
-        body_text=final_body,
-        is_read=True,
-        scheduled_at=dt,
-        received_at=timezone.now(),
-    )
     display_dt = dt.astimezone(client_tz) if client_tz else dt
     return {
-        "reply": f"Scheduled email **{msg.subject}** to **{resolved_to}** for `{display_dt.strftime('%Y-%m-%d %H:%M')}`.",
-        "ui_actions": [
-            {
-                "type": "apply_filters",
-                "folder": "scheduled",
-                "emails": [
-                    m.to_dict(include_body=False)
-                    for m in query_emails(account, folder="scheduled")[:50]
-                ],
-            }
-        ],
-        "rich_cards": [{"type": "email_preview", "email": msg.to_dict(include_body=False)}],
+        "reply": "Please review the prepared email below. Edit any field in the compose view, then confirm to schedule it.",
+        "ui_actions": [{"type": "fill_compose", "to": resolved_to,
+            "subject": final_subject or "(No subject)", "body": final_body,
+            "scheduled_at": dt.isoformat()}],
+        "rich_cards": [{"type": "schedule_confirmation", "draft": {
+            "to": resolved_to, "subject": final_subject or "(No subject)",
+            "body": final_body, "scheduled_at": dt.isoformat(),
+        }}],
+        "agent_steps": ["Prepared email draft", "Waiting for your scheduling confirmation"],
     }
 
 

@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.db import models
 from django.utils import timezone
 
@@ -104,4 +106,38 @@ class Contact(models.Model):
             "name": self.name,
             "email": self.email,
             "notes": self.notes,
+        }
+
+
+class CalendarEvent(models.Model):
+    account = models.ForeignKey(MailAccount, on_delete=models.CASCADE, related_name="calendar_events")
+    source_email = models.ForeignKey(
+        EmailMessage, on_delete=models.SET_NULL, null=True, blank=True, related_name="calendar_events"
+    )
+    title = models.CharField(max_length=500)
+    description = models.TextField(blank=True)
+    start_at = models.DateTimeField(db_index=True)
+    end_at = models.DateTimeField(null=True, blank=True)
+    all_day = models.BooleanField(default=False)
+    reminder_minutes = models.PositiveSmallIntegerField(default=15)
+    reminder_acknowledged = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["start_at", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["account", "source_email"], name="unique_calendar_event_per_source_email")
+        ]
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "source_email_id": self.source_email_id,
+            "title": self.title,
+            "description": self.description,
+            "start_at": self.start_at.isoformat(),
+            "end_at": self.end_at.isoformat() if self.end_at else None,
+            "all_day": self.all_day,
+            "reminder_minutes": self.reminder_minutes,
+            "reminder_at": (self.start_at - timedelta(minutes=self.reminder_minutes)).isoformat(),
         }
