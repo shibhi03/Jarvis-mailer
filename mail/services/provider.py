@@ -93,3 +93,11 @@ def get_active_account() -> MailAccount:
         },
     )
     return demo_account
+
+
+def get_provider_for_account(account: MailAccount) -> BaseMailProvider:
+    if account.provider == MailAccount.PROVIDER_GMAIL:
+        from mail.services.gmail_provider import GmailMailProvider
+
+        return GmailMailProvider(account)
+    return DemoMailProvider(account)
