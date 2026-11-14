@@ -1,3 +1,5 @@
+import os
+
 from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import redirect
@@ -48,6 +50,9 @@ def google_login(request):
 
 @require_GET
 def google_callback(request):
+    if settings.DEBUG:
+        os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
     code = request.GET.get("code")
     if not code:
         return JsonResponse({"error": "Missing authorization code"}, status=400)

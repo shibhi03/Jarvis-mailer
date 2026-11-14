@@ -321,12 +321,19 @@ async function loadAuthStatus() {
     status.provider === "gmail" ? "Gmail Connected" : "Demo Mode (Local)";
 
   const connectBtn = document.getElementById("btn-connect-gmail");
+  const syncBtn = document.getElementById("btn-sync-gmail");
   const disconnectBtn = document.getElementById("btn-disconnect-gmail");
   if (status.provider === "gmail") {
     connectBtn.classList.add("hidden");
+    syncBtn.classList.remove("hidden");
     disconnectBtn.classList.remove("hidden");
   } else if (status.oauth_configured) {
     connectBtn.classList.remove("hidden");
+    syncBtn.classList.add("hidden");
+    disconnectBtn.classList.add("hidden");
+  } else {
+    connectBtn.classList.add("hidden");
+    syncBtn.classList.add("hidden");
     disconnectBtn.classList.add("hidden");
   }
 }
@@ -460,6 +467,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("btn-simulate-push").addEventListener("click", async () => {
     await apiFetch("/api/mail/simulate-incoming/", { method: "POST", body: "{}" });
+  });
+
+  document.getElementById("btn-sync-gmail").addEventListener("click", async () => {
+    const res = await apiFetch("/api/emails/sync/", { method: "POST" });
+    showToast(`Synced ${res.added || 0} new email(s)`);
+    fetchEmails();
   });
 
   document.getElementById("btn-disconnect-gmail").addEventListener("click", async () => {
