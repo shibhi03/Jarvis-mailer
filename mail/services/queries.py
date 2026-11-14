@@ -33,8 +33,21 @@ def query_emails(
     """Filter emails for an account using shared criteria for UI and AI Assistant."""
     qs = EmailMessage.objects.filter(account=account)
 
-    if folder in (EmailMessage.FOLDER_INBOX, EmailMessage.FOLDER_SENT):
+    if folder == "starred":
+        qs = qs.filter(is_starred=True).exclude(
+            folder__in=[EmailMessage.FOLDER_SPAM, EmailMessage.FOLDER_BIN]
+        )
+    elif folder in (
+        EmailMessage.FOLDER_INBOX,
+        EmailMessage.FOLDER_SENT,
+        EmailMessage.FOLDER_DRAFTS,
+        EmailMessage.FOLDER_SPAM,
+        EmailMessage.FOLDER_BIN,
+        EmailMessage.FOLDER_SCHEDULED,
+    ):
         qs = qs.filter(folder=folder)
+    else:
+        qs = qs.exclude(folder__in=[EmailMessage.FOLDER_SPAM, EmailMessage.FOLDER_BIN])
 
     if q:
         term = q.strip()

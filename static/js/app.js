@@ -1,8 +1,9 @@
 const state = {
-  currentView: "inbox", // inbox | sent | detail | compose
+  currentView: "inbox", // inbox | starred | sent | drafts | scheduled | spam | bin | contacts | detail | compose
   folder: "inbox",
   openEmailId: null,
   openEmail: null,
+  composeDraftId: null,
   composeThreadId: null,
   composeInReplyTo: null,
   filters: {
@@ -80,9 +81,19 @@ function switchView(viewName) {
     document.getElementById("view-contacts").classList.add("active");
     document.getElementById("nav-contacts").classList.add("active");
   } else {
-    state.folder = viewName === "sent" ? "sent" : "inbox";
+    const validFolders = ["inbox", "starred", "sent", "drafts", "scheduled", "spam", "bin"];
+    state.folder = validFolders.includes(viewName) ? viewName : "inbox";
     document.getElementById("view-list").classList.add("active");
-    document.getElementById("list-title").textContent = state.folder === "sent" ? "Sent" : "Inbox";
+    const titles = {
+      inbox: "Inbox",
+      starred: "Starred",
+      sent: "Sent",
+      drafts: "Drafts",
+      scheduled: "Scheduled",
+      spam: "Spam",
+      bin: "Bin",
+    };
+    document.getElementById("list-title").textContent = titles[state.folder] || "Inbox";
     document.querySelectorAll(".nav-item[data-folder]").forEach((b) => {
       b.classList.toggle("active", b.dataset.folder === state.folder);
     });
@@ -101,20 +112,40 @@ function renderEmailList(emails) {
 
   listEl.innerHTML = emails
     .map((m) => {
-      const displayPerson = state.folder === "sent" ? `To: ${m.recipient_email}` : m.sender_name;
+      const displayPerson =
+        ["sent", "drafts", "scheduled"].includes(state.folder)
+          ? `To: ${m.recipient_email || "(No recipient)"}`
+          : m.sender_name;
+      const dateText =
+        state.folder === "scheduled" && m.scheduled_at
+          ? `⏰ ${formatDate(m.scheduled_at)}`
+          : formatDate(m.received_at);
       return `
         <div class="email-row ${m.is_read ? "" : "unread"}" data-id="${m.id}">
           <span class="unread-dot"></span>
+          <button class="star-btn ${m.is_starred ? "starred" : ""}" data-star-id="${m.id}" title="Star">
+            ${m.is_starred ? "★" : "☆"}
+          </button>
           <span class="email-sender">${escapeHtml(displayPerson)}</span>
           <span class="email-content">
             <span class="email-subject">${escapeHtml(m.subject)}</span>
             <span class="email-snippet">— ${escapeHtml(m.snippet)}</span>
           </span>
-          <span class="email-date">${formatDate(m.received_at)}</span>
+          <span class="email-date">${dateText}</span>
         </div>
       `;
     })
     .join("");
+
+  listEl.querySelectorAll(".star-btn").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const res = await apiFetch(`/api/emails/${btn.dataset.starId}/star/`, { method: "POST" });
+      btn.classList.toggle("starred", res.is_starred);
+      btn.textContent = res.is_starred ? "★" : "☆";
+      if (state.folder === "starred" && !res.is_starred) fetchEmails();
+    });
+  });
 
   listEl.querySelectorAll(".email-row").forEach((row) => {
     row.addEventListener("click", () => openEmailDetail(Number(row.dataset.id)));
@@ -146,6 +177,9 @@ function renderDetailView(email, thread) {
 
   document.getElementById("detail-subject").textContent = email.subject;
   document.getElementById("btn-toggle-read").textContent = email.is_read ? "Mark Unread" : "Mark Read";
+  document.getElementById("btn-star-detail").textContent = email.is_starred ? "★ Starred" : "☆ Star";
+  document.getElementById("btn-spam").textContent = email.folder === "spam" ? "Not Spam" : "Spam";
+  document.getElementById("btn-bin").textContent = email.folder === "bin" ? "Delete Forever" : "Bin";
 
   const container = document.getElementById("thread-container");
   const messages = thread && thread.length ? thread : [email];
@@ -166,17 +200,31 @@ function renderDetailView(email, thread) {
 
 async function openEmailDetail(emailId) {
   const data = await apiFetch(`/api/emails/${emailId}/`);
+  if (data.email && data.email.folder === "drafts") {
+    openCompose({
+      draftId: data.email.id,
+      to: data.email.recipient_email,
+      subject: data.email.subject === "(No subject)" ? "" : data.email.subject,
+      body: data.email.body_text,
+      threadId: data.email.thread_id,
+      inReplyTo: data.email.in_reply_to,
+      title: "Edit Draft",
+    });
+    return;
+  }
   renderDetailView(data.email, data.thread);
   updateUnreadBadge(data.unread_count || 0);
 }
 
-function openCompose({ to = "", subject = "", body = "", threadId = null, inReplyTo = null, title = "New Message" } = {}) {
+function openCompose({ draftId = null, to = "", subject = "", body = "", threadId = null, inReplyTo = null, title = "New Message" } = {}) {
+  state.composeDraftId = draftId;
   state.composeThreadId = threadId;
   state.composeInReplyTo = inReplyTo;
   document.getElementById("compose-title").textContent = title;
   document.getElementById("compose-to").value = to;
   document.getElementById("compose-subject").value = subject;
   document.getElementById("compose-body").value = body;
+  document.getElementById("compose-schedule-at").value = "";
   switchView("compose");
 }
 
@@ -241,6 +289,11 @@ async function executeUiActions(actions = []) {
       renderDetailView(action.email, action.thread || [action.email]);
     } else if (action.type === "refresh_contacts") {
       if (state.currentView === "contacts") fetchContacts();
+    } else if (action.type === "update_star") {
+      if (state.openEmail && state.openEmail.id === action.id) {
+        state.openEmail.is_starred = action.is_starred;
+        document.getElementById("btn-star-detail").textContent = action.is_starred ? "★ Starred" : "☆ Star";
+      }
     }
   }
 }
@@ -483,15 +536,98 @@ document.addEventListener("DOMContentLoaded", () => {
     updateUnreadBadge(res.unread_count || 0);
   });
 
+  document.getElementById("btn-star-detail").addEventListener("click", async () => {
+    if (!state.openEmailId) return;
+    const res = await apiFetch(`/api/emails/${state.openEmailId}/star/`, { method: "POST" });
+    if (state.openEmail) state.openEmail.is_starred = res.is_starred;
+    document.getElementById("btn-star-detail").textContent = res.is_starred ? "★ Starred" : "☆ Star";
+  });
+
+  document.getElementById("btn-spam").addEventListener("click", async () => {
+    if (!state.openEmailId || !state.openEmail) return;
+    const target = state.openEmail.folder === "spam" ? "inbox" : "spam";
+    await apiFetch(`/api/emails/${state.openEmailId}/move/`, {
+      method: "POST",
+      body: JSON.stringify({ folder: target }),
+    });
+    showToast(target === "spam" ? "Moved to Spam" : "Moved to Inbox");
+    switchView(state.folder);
+    fetchEmails();
+  });
+
+  document.getElementById("btn-bin").addEventListener("click", async () => {
+    if (!state.openEmailId || !state.openEmail) return;
+    const target = state.openEmail.folder === "bin" ? "delete" : "bin";
+    await apiFetch(`/api/emails/${state.openEmailId}/move/`, {
+      method: "POST",
+      body: JSON.stringify({ folder: target }),
+    });
+    showToast(target === "delete" ? "Deleted permanently" : "Moved to Bin");
+    switchView(state.folder);
+    fetchEmails();
+  });
+
   document.getElementById("compose-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     await sendComposeDraft({
+      draft_id: state.composeDraftId,
       to: document.getElementById("compose-to").value,
       subject: document.getElementById("compose-subject").value,
       body: document.getElementById("compose-body").value,
       thread_id: state.composeThreadId,
       in_reply_to: state.composeInReplyTo,
     });
+    state.composeDraftId = null;
+  });
+
+  document.getElementById("btn-save-draft").addEventListener("click", async () => {
+    const res = await apiFetch("/api/emails/draft/", {
+      method: "POST",
+      body: JSON.stringify({
+        draft_id: state.composeDraftId,
+        to: document.getElementById("compose-to").value,
+        subject: document.getElementById("compose-subject").value,
+        body: document.getElementById("compose-body").value,
+        thread_id: state.composeThreadId,
+        in_reply_to: state.composeInReplyTo,
+      }),
+    });
+    if (res.status === "saved") {
+      state.composeDraftId = null;
+      showToast("Draft saved");
+      switchView("drafts");
+      fetchEmails();
+    } else {
+      showToast(res.error || "Failed to save draft");
+    }
+  });
+
+  document.getElementById("btn-schedule-send").addEventListener("click", async () => {
+    const scheduledAt = document.getElementById("compose-schedule-at").value;
+    if (!scheduledAt) {
+      showToast("Please pick a date and time to schedule send");
+      return;
+    }
+    const res = await apiFetch("/api/emails/schedule/", {
+      method: "POST",
+      body: JSON.stringify({
+        draft_id: state.composeDraftId,
+        to: document.getElementById("compose-to").value,
+        subject: document.getElementById("compose-subject").value,
+        body: document.getElementById("compose-body").value,
+        scheduled_at: scheduledAt,
+        thread_id: state.composeThreadId,
+        in_reply_to: state.composeInReplyTo,
+      }),
+    });
+    if (res.status === "scheduled") {
+      state.composeDraftId = null;
+      showToast("Email scheduled");
+      switchView("scheduled");
+      fetchEmails();
+    } else {
+      showToast(res.error || "Failed to schedule email");
+    }
   });
 
   const syncFilters = () => {

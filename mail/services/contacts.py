@@ -1,9 +1,21 @@
+import re
 from typing import List, Optional, Tuple
 
 from django.db.models import Q
 
 from accounts.models import MailAccount
 from mail.models import Contact, EmailMessage
+
+AUTOMATED_EMAIL_RE = re.compile(
+    r"(no[-_.\s]?reply|do[-_.\s]?not[-_.\s]?reply|mailer[-_.]?daemon|"
+    r"postmaster|auto[-_.]?reply|bounces?|notifications?|newsletter|automated)",
+    re.IGNORECASE,
+)
+
+
+def is_automated_email(email: str, name: str = "") -> bool:
+    local_part = (email or "").split("@")[0]
+    return bool(AUTOMATED_EMAIL_RE.search(local_part) or AUTOMATED_EMAIL_RE.search(name or ""))
 
 
 def upsert_contact(
@@ -13,6 +25,8 @@ def upsert_contact(
     if not clean_email or "@" not in clean_email:
         return None
     if clean_email == account.email.lower():
+        return None
+    if is_automated_email(clean_email, name):
         return None
 
     clean_name = (name or "").strip() or clean_email.split("@")[0].replace(".", " ").title()

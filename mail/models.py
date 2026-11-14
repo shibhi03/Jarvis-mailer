@@ -7,9 +7,17 @@ from accounts.models import MailAccount
 class EmailMessage(models.Model):
     FOLDER_INBOX = "inbox"
     FOLDER_SENT = "sent"
+    FOLDER_DRAFTS = "drafts"
+    FOLDER_SPAM = "spam"
+    FOLDER_BIN = "bin"
+    FOLDER_SCHEDULED = "scheduled"
     FOLDER_CHOICES = [
         (FOLDER_INBOX, "Inbox"),
         (FOLDER_SENT, "Sent"),
+        (FOLDER_DRAFTS, "Drafts"),
+        (FOLDER_SPAM, "Spam"),
+        (FOLDER_BIN, "Bin"),
+        (FOLDER_SCHEDULED, "Scheduled"),
     ]
 
     account = models.ForeignKey(
@@ -32,7 +40,9 @@ class EmailMessage(models.Model):
     body_text = models.TextField(blank=True)
     body_html = models.TextField(blank=True)
     is_read = models.BooleanField(default=False, db_index=True)
+    is_starred = models.BooleanField(default=False, db_index=True)
     in_reply_to = models.CharField(max_length=255, blank=True)
+    scheduled_at = models.DateTimeField(null=True, blank=True, db_index=True)
     received_at = models.DateTimeField(default=timezone.now, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -58,7 +68,9 @@ class EmailMessage(models.Model):
             "subject": self.subject or "(No subject)",
             "snippet": self.snippet or (self.body_text[:140] if self.body_text else ""),
             "is_read": self.is_read,
+            "is_starred": self.is_starred,
             "in_reply_to": self.in_reply_to,
+            "scheduled_at": self.scheduled_at.isoformat() if self.scheduled_at else None,
             "received_at": self.received_at.isoformat(),
         }
         if include_body:

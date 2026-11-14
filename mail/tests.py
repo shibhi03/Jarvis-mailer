@@ -5,7 +5,8 @@ from django.test import Client, TestCase
 from django.utils import timezone
 
 from accounts.models import MailAccount
-from mail.models import EmailMessage
+from mail.models import Contact, EmailMessage
+from mail.services.contacts import upsert_contact
 from mail.services.realtime import realtime_broker
 
 
@@ -118,3 +119,63 @@ class MailApiTests(TestCase):
             self.assertEqual(event["data"]["subject"], "Realtime Test")
         finally:
             realtime_broker.unsubscribe(q)
+
+    def test_draft_star_spam_bin_and_scheduled(self):
+        # Draft
+        draft_res = self.client.post(
+            "/api/emails/draft/",
+            data=json.dumps({"to": "bob@example.com", "subject": "Draft 1", "body": "WIP"}),
+            content_type="application/json",
+        )
+        self.assertEqual(draft_res.status_code, 201)
+        self.assertEqual(len(self.client.get("/api/emails/?folder=drafts").json()["emails"]), 1)
+
+        # Star
+        star_res = self.client.post(f"/api/emails/{self.e1.id}/star/").json()
+        self.assertTrue(star_res["is_starred"])
+        self.assertEqual(len(self.client.get("/api/emails/?folder=starred").json()["emails"]), 1)
+
+        # Spam & Bin
+        self.client.post(
+            f"/api/emails/{self.e1.id}/move/",
+            data=json.dumps({"folder": "spam"}),
+            content_type="application/json",
+        )
+        self.assertEqual(len(self.client.get("/api/emails/?folder=spam").json()["emails"]), 1)
+        self.assertEqual(len(self.client.get("/api/emails/?folder=starred").json()["emails"]), 0)
+
+        self.client.post(
+            f"/api/emails/{self.e1.id}/move/",
+            data=json.dumps({"folder": "bin"}),
+            content_type="application/json",
+        )
+        self.assertEqual(len(self.client.get("/api/emails/?folder=bin").json()["emails"]), 1)
+
+        # Scheduled send (past due -> auto-dispatched on list)
+        past_time = (timezone.now() - timedelta(minutes=1)).isoformat()
+        sched_res = self.client.post(
+            "/api/emails/schedule/",
+            data=json.dumps(
+                {
+                    "to": "tim@example.com",
+                    "subject": "Scheduled Hello",
+                    "body": "Sent automatically",
+                    "scheduled_at": past_time,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(sched_res.status_code, 201)
+        self.assertEqual(len(self.client.get("/api/emails/?folder=scheduled").json()["emails"]), 0)
+        self.assertTrue(
+            EmailMessage.objects.filter(
+                folder=EmailMessage.FOLDER_SENT, recipient_email="tim@example.com"
+            ).exists()
+        )
+
+    def test_noreply_emails_excluded_from_contact_book(self):
+        self.assertIsNone(upsert_contact(self.account, "GitHub", "noreply@github.com"))
+        self.assertIsNone(upsert_contact(self.account, "Stripe", "no-reply@stripe.com"))
+        self.assertIsNone(upsert_contact(self.account, "No Reply", "notifications@service.com"))
+        self.assertIsNotNone(upsert_contact(self.account, "Sarah Chen", "sarah@example.com"))
+        self.assertEqual(Contact.objects.filter(account=self.account).count(), 1)

@@ -8,10 +8,12 @@ from accounts.models import MailAccount
 from assistant.services.tools import (
     execute_compose_tool,
     execute_forward_open_email,
+    execute_move_open_email,
     execute_open_email_tool,
     execute_reply_open_email,
     execute_save_contact_tool,
     execute_search_tool,
+    execute_star_open_email,
 )
 
 MONTH_MAP = {
@@ -194,6 +196,16 @@ def run_fallback_nlu(
             custom_body = m_say.group(1).strip()
         return execute_reply_open_email(account, open_email_id, custom_body=custom_body)
 
+    # 1b. Star / Spam / Bin actions on open email
+    if re.search(r"\b(unstar|remove star)\b", lower):
+        return execute_star_open_email(account, open_email_id, starred=False)
+    if re.search(r"\bstar\b", lower) and not any(w in lower for w in ("starred", "show", "open")):
+        return execute_star_open_email(account, open_email_id, starred=True)
+    if re.search(r"\b(move to spam|mark as spam|spam this)\b", lower):
+        return execute_move_open_email(account, open_email_id, "spam")
+    if re.search(r"\b(move to bin|move to trash|delete this|trash this)\b", lower):
+        return execute_move_open_email(account, open_email_id, "bin")
+
     # 2. Forward currently open email (supports email OR contact name)
     if re.search(r"\bforward\b", lower):
         email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)
@@ -243,11 +255,24 @@ def run_fallback_nlu(
                 date_to=date_to,
             )
 
-    # 6. Navigate to Sent or Inbox directly
-    if re.fullmatch(r"(?:go\s+to\s+|open\s+|show\s+)?(?:my\s+)?sent(?:\s+emails?)?", lower):
-        return execute_search_tool(account, folder="sent")
-    if re.fullmatch(r"(?:go\s+to\s+|open\s+|show\s+)?(?:my\s+)?inbox", lower):
-        return execute_search_tool(account, folder="inbox")
+    # 6. Navigate to folders directly
+    folder_nav_map = {
+        "sent": "sent",
+        "inbox": "inbox",
+        "draft": "drafts",
+        "drafts": "drafts",
+        "starred": "starred",
+        "spam": "spam",
+        "bin": "bin",
+        "trash": "bin",
+        "scheduled": "scheduled",
+    }
+    m_nav = re.fullmatch(
+        r"(?:go\s+to\s+|open\s+|show\s+)?(?:my\s+)?(inbox|sent|drafts?|starred|spam|bin|trash|scheduled)(?:\s+(?:emails?|mails?|folder))?",
+        lower,
+    )
+    if m_nav:
+        return execute_search_tool(account, folder=folder_nav_map[m_nav.group(1)])
 
     # 7. Search & Filter emails
     folder = "sent" if "sent" in lower else "inbox"

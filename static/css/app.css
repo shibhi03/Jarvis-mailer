@@ -215,11 +215,25 @@ body {
   border-radius: 10px;
   padding: 12px 14px;
   display: grid;
-  grid-template-columns: 14px 180px 1fr 90px;
-  gap: 12px;
+  grid-template-columns: 14px 24px 180px 1fr 110px;
+  gap: 10px;
   align-items: center;
   cursor: pointer;
   transition: border-color 0.15s, transform 0.1s;
+}
+
+.star-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+  padding: 0;
+}
+
+.star-btn.starred {
+  color: #f59e0b;
 }
 
 .email-row:hover {

@@ -1,7 +1,10 @@
 import json
+import uuid
+from datetime import datetime
 
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
+from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
@@ -9,6 +12,7 @@ from mail.models import Contact, EmailMessage
 from mail.services.contacts import sync_contacts_from_messages, upsert_contact
 from mail.services.provider import get_active_account, get_provider_for_account
 from mail.services.queries import query_emails
+from mail.services.scheduler import dispatch_due_scheduled_emails
 
 
 @ensure_csrf_cookie
@@ -20,6 +24,7 @@ def index(request):
 @require_GET
 def list_emails(request):
     account = get_active_account()
+    dispatch_due_scheduled_emails(account)
     folder = request.GET.get("folder", EmailMessage.FOLDER_INBOX)
     q = request.GET.get("q") or None
     sender = request.GET.get("sender") or None
@@ -133,7 +138,148 @@ def send_email(request):
     for addr in to.split(","):
         upsert_contact(account, "", addr.strip())
 
+    draft_id = data.get("draft_id")
+    if draft_id:
+        EmailMessage.objects.filter(
+            account=account,
+            id=draft_id,
+            folder__in=[EmailMessage.FOLDER_DRAFTS, EmailMessage.FOLDER_SCHEDULED],
+        ).delete()
+
     return JsonResponse({"status": "sent", "email": sent_msg.to_dict(include_body=True)}, status=201)
+
+
+@require_POST
+def save_draft(request):
+    account = get_active_account()
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    draft_id = data.get("draft_id")
+    to = (data.get("to") or "").strip()
+    subject = (data.get("subject") or "").strip()
+    body = (data.get("body") or "").strip()
+    thread_id = data.get("thread_id") or f"thread-{uuid.uuid4().hex[:10]}"
+    in_reply_to = data.get("in_reply_to") or ""
+
+    if draft_id:
+        draft = EmailMessage.objects.filter(
+            account=account, id=draft_id, folder=EmailMessage.FOLDER_DRAFTS
+        ).first()
+    else:
+        draft = None
+
+    if draft:
+        draft.recipient_email = to
+        draft.subject = subject or "(No subject)"
+        draft.body_text = body
+        draft.snippet = " ".join(body.split())[:140]
+        draft.received_at = timezone.now()
+        draft.save()
+    else:
+        draft = EmailMessage.objects.create(
+            account=account,
+            provider_message_id=f"draft-{uuid.uuid4().hex[:10]}",
+            thread_id=thread_id,
+            folder=EmailMessage.FOLDER_DRAFTS,
+            sender_name=account.display_name or "Me",
+            sender_email=account.email,
+            recipient_email=to,
+            subject=subject or "(No subject)",
+            snippet=" ".join(body.split())[:140],
+            body_text=body,
+            is_read=True,
+            in_reply_to=in_reply_to,
+            received_at=timezone.now(),
+        )
+    return JsonResponse({"status": "saved", "email": draft.to_dict(include_body=True)}, status=201)
+
+
+@require_POST
+def schedule_email(request):
+    account = get_active_account()
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    to = (data.get("to") or "").strip()
+    subject = (data.get("subject") or "").strip()
+    body = (data.get("body") or "").strip()
+    scheduled_raw = (data.get("scheduled_at") or "").strip()
+    if not to:
+        return JsonResponse({"error": "Recipient 'to' is required"}, status=400)
+    if not scheduled_raw:
+        return JsonResponse({"error": "Scheduled date/time is required"}, status=400)
+
+    try:
+        scheduled_dt = datetime.fromisoformat(scheduled_raw.replace("Z", "+00:00"))
+        if timezone.is_naive(scheduled_dt):
+            scheduled_dt = timezone.make_aware(scheduled_dt, timezone.get_current_timezone())
+    except ValueError:
+        return JsonResponse({"error": "Invalid scheduled_at datetime format"}, status=400)
+
+    msg = EmailMessage.objects.create(
+        account=account,
+        provider_message_id=f"sched-{uuid.uuid4().hex[:10]}",
+        thread_id=data.get("thread_id") or f"thread-{uuid.uuid4().hex[:10]}",
+        folder=EmailMessage.FOLDER_SCHEDULED,
+        sender_name=account.display_name or "Me",
+        sender_email=account.email,
+        recipient_email=to,
+        subject=subject or "(No subject)",
+        snippet=" ".join(body.split())[:140],
+        body_text=body,
+        is_read=True,
+        in_reply_to=data.get("in_reply_to") or "",
+        scheduled_at=scheduled_dt,
+        received_at=timezone.now(),
+    )
+    draft_id = data.get("draft_id")
+    if draft_id:
+        EmailMessage.objects.filter(
+            account=account, id=draft_id, folder=EmailMessage.FOLDER_DRAFTS
+        ).delete()
+    return JsonResponse({"status": "scheduled", "email": msg.to_dict(include_body=True)}, status=201)
+
+
+@require_POST
+def toggle_star(request, email_id: int):
+    account = get_active_account()
+    email = get_object_or_404(EmailMessage, id=email_id, account=account)
+    email.is_starred = not email.is_starred
+    email.save(update_fields=["is_starred"])
+    return JsonResponse({"id": email.id, "is_starred": email.is_starred})
+
+
+@require_POST
+def move_email(request, email_id: int):
+    account = get_active_account()
+    email = get_object_or_404(EmailMessage, id=email_id, account=account)
+    try:
+        data = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    target = (data.get("folder") or "").strip().lower()
+
+    if target == "delete":
+        email.delete()
+        return JsonResponse({"status": "deleted"})
+
+    allowed = {
+        EmailMessage.FOLDER_INBOX,
+        EmailMessage.FOLDER_SPAM,
+        EmailMessage.FOLDER_BIN,
+        EmailMessage.FOLDER_DRAFTS,
+    }
+    if target not in allowed:
+        return JsonResponse({"error": "Invalid target folder"}, status=400)
+
+    email.folder = target
+    email.save(update_fields=["folder"])
+    return JsonResponse({"status": "moved", "id": email.id, "folder": email.folder})
 
 
 @require_POST

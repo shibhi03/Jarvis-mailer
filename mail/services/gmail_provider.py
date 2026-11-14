@@ -102,6 +102,7 @@ class GmailMailProvider(BaseMailProvider):
         snippet = raw.get("snippet", "") or " ".join(body_text.split())[:140]
         label_ids = raw.get("labelIds", [])
         is_read = "UNREAD" not in label_ids
+        is_starred = "STARRED" in label_ids
 
         obj, created = EmailMessage.objects.update_or_create(
             account=self.account,
@@ -112,11 +113,12 @@ class GmailMailProvider(BaseMailProvider):
                 "sender_name": sender_name or sender_email,
                 "sender_email": sender_email or self.account.email,
                 "recipient_email": recipient,
-                "subject": subject,
+                "subject": subject[:500],
                 "snippet": snippet,
                 "body_text": body_text or snippet,
                 "body_html": body_html,
                 "is_read": is_read,
+                "is_starred": is_starred,
                 "in_reply_to": in_reply_to,
                 "received_at": received_at,
             },
@@ -126,7 +128,14 @@ class GmailMailProvider(BaseMailProvider):
     def sync_messages(self, max_results: int = 20) -> int:
         service = self._service()
         added = 0
-        for label, folder in [("INBOX", EmailMessage.FOLDER_INBOX), ("SENT", EmailMessage.FOLDER_SENT)]:
+        folder_map = [
+            ("INBOX", EmailMessage.FOLDER_INBOX),
+            ("SENT", EmailMessage.FOLDER_SENT),
+            ("DRAFT", EmailMessage.FOLDER_DRAFTS),
+            ("SPAM", EmailMessage.FOLDER_SPAM),
+            ("TRASH", EmailMessage.FOLDER_BIN),
+        ]
+        for label, folder in folder_map:
             resp = (
                 service.users()
                 .messages()

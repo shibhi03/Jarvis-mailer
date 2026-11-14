@@ -78,10 +78,15 @@ def execute_search_tool(
     results = [m.to_dict(include_body=False) for m in qs[:50]]
 
     filter_parts: List[str] = []
-    if folder == "sent":
-        filter_parts.append("Sent")
-    else:
-        filter_parts.append("Inbox")
+    folder_labels = {
+        "sent": "Sent",
+        "drafts": "Drafts",
+        "starred": "Starred",
+        "spam": "Spam",
+        "bin": "Bin",
+        "scheduled": "Scheduled",
+    }
+    filter_parts.append(folder_labels.get(folder, "Inbox"))
     if is_read is False:
         filter_parts.append("unread only")
     elif is_read is True:
@@ -285,3 +290,33 @@ def execute_save_contact_tool(
         "ui_actions": [{"type": "refresh_contacts"}],
         "rich_cards": [],
     }
+
+
+def execute_star_open_email(
+    account: MailAccount, open_email_id: Optional[int], starred: bool = True
+) -> Dict[str, Any]:
+    if not open_email_id:
+        return {"reply": "Open an email first to star or unstar it.", "ui_actions": [], "rich_cards": []}
+    target = EmailMessage.objects.filter(account=account, id=open_email_id).first()
+    if not target:
+        return {"reply": "Could not find the open email.", "ui_actions": [], "rich_cards": []}
+    target.is_starred = starred
+    target.save(update_fields=["is_starred"])
+    return {
+        "reply": f"{'Starred' if starred else 'Unstarred'} **{target.subject}**.",
+        "ui_actions": [{"type": "update_star", "id": target.id, "is_starred": starred}],
+        "rich_cards": [],
+    }
+
+
+def execute_move_open_email(
+    account: MailAccount, open_email_id: Optional[int], target_folder: str
+) -> Dict[str, Any]:
+    if not open_email_id:
+        return {"reply": "Open an email first to move it.", "ui_actions": [], "rich_cards": []}
+    target = EmailMessage.objects.filter(account=account, id=open_email_id).first()
+    if not target:
+        return {"reply": "Could not find the open email.", "ui_actions": [], "rich_cards": []}
+    target.folder = target_folder
+    target.save(update_fields=["folder"])
+    return execute_search_tool(account, folder="inbox")

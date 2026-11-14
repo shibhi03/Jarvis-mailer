@@ -26,8 +26,23 @@
           <span>Inbox</span>
           <span id="unread-badge" class="badge hidden">0</span>
         </button>
+        <button id="nav-starred" class="nav-item" data-folder="starred">
+          <span>★ Starred</span>
+        </button>
         <button id="nav-sent" class="nav-item" data-folder="sent">
           <span>Sent</span>
+        </button>
+        <button id="nav-drafts" class="nav-item" data-folder="drafts">
+          <span>Drafts</span>
+        </button>
+        <button id="nav-scheduled" class="nav-item" data-folder="scheduled">
+          <span>Scheduled</span>
+        </button>
+        <button id="nav-spam" class="nav-item" data-folder="spam">
+          <span>Spam</span>
+        </button>
+        <button id="nav-bin" class="nav-item" data-folder="bin">
+          <span>Bin</span>
         </button>
         <button id="nav-contacts" class="nav-item" data-view="contacts">
           <span>Contacts</span>
@@ -88,9 +103,12 @@
         <div class="detail-toolbar">
           <button id="btn-back-list" class="btn btn-sm btn-outline">← Back</button>
           <div class="detail-actions">
+            <button id="btn-star-detail" class="btn btn-sm btn-outline">☆ Star</button>
             <button id="btn-reply" class="btn btn-sm btn-primary">Reply</button>
             <button id="btn-forward" class="btn btn-sm btn-outline">Forward</button>
             <button id="btn-toggle-read" class="btn btn-sm btn-ghost">Mark Unread</button>
+            <button id="btn-spam" class="btn btn-sm btn-ghost">Spam</button>
+            <button id="btn-bin" class="btn btn-sm btn-ghost">Bin</button>
           </div>
         </div>
         <h2 id="detail-subject" class="detail-subject"></h2>
@@ -116,8 +134,13 @@
             <span>Message</span>
             <textarea id="compose-body" class="textarea" rows="12" placeholder="Write your message..."></textarea>
           </label>
-          <div class="compose-footer">
+          <div class="compose-footer" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
             <button type="submit" id="btn-send-email" class="btn btn-primary">Send Email</button>
+            <button type="button" id="btn-save-draft" class="btn btn-outline">Save Draft</button>
+            <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
+              <input id="compose-schedule-at" type="datetime-local" class="input" style="width:auto;" />
+              <button type="button" id="btn-schedule-send" class="btn btn-outline">Schedule Send</button>
+            </div>
           </div>
         </form>
       </section>
