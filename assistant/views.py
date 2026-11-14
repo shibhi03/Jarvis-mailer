@@ -16,9 +16,10 @@ def assistant_command(request):
 
     message = (payload.get("message") or "").strip()
     ui_context = payload.get("ui_context") or {}
+    history = payload.get("history") or []
     if not message:
         return JsonResponse({"error": "Message is required"}, status=400)
 
     account = get_active_account()
-    result = process_assistant_command(account, message, ui_context)
+    result = process_assistant_command(account, message, ui_context, history=history)
     return JsonResponse(result)

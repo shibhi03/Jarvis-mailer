@@ -490,6 +490,21 @@ body {
   margin-top: 8px;
 }
 
+.agent-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.agent-step-pill {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
 .assistant-input-bar {
   display: flex;
   gap: 8px;

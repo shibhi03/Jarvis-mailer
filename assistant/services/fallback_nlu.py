@@ -10,11 +10,13 @@ from assistant.services.tools import (
     execute_forward_open_email,
     execute_move_open_email,
     execute_open_email_tool,
+    execute_read_email_detail,
     execute_reply_open_email,
     execute_save_contact_tool,
     execute_search_tool,
     execute_star_open_email,
 )
+from mail.services.queries import query_emails
 
 MONTH_MAP = {
     "jan": 1, "january": 1,
@@ -168,12 +170,61 @@ def _parse_about_keyword(message: str) -> Optional[str]:
     return None
 
 
-def run_fallback_nlu(
+def _run_single_step(
     account: MailAccount, message: str, ui_context: Dict[str, Any]
 ) -> Dict[str, Any]:
     text = message.strip()
     lower = text.lower()
     open_email_id = ui_context.get("open_email_id")
+
+    # Summarize email(s)
+    if re.search(r"\bsummari[sz]e\b", lower):
+        sender = _parse_sender(text)
+        if open_email_id and not sender and "inbox" not in lower and "unread" not in lower:
+            detail = execute_read_email_detail(account, email_id=open_email_id)
+            if detail.get("found"):
+                em = detail["email"]
+                lines = [ln.strip() for ln in (em.get("body_text") or "").splitlines() if ln.strip()]
+                summary_body = " ".join(lines[:3])[:260]
+                return {
+                    "reply": f"**Summary of \"{em['subject']}\"** (from {em['sender_name']}):\n{summary_body}",
+                    "ui_actions": [],
+                    "rich_cards": [{"type": "email_preview", "email": em}],
+                    "agent_steps": [f"Read email '{em['subject']}'", "Generated concise summary"],
+                }
+        qs = query_emails(
+            account,
+            folder="inbox",
+            sender=sender,
+            is_read=(False if "unread" in lower else None),
+            days=_parse_days(lower),
+        )
+        items = list(qs[:5])
+        if not items:
+            return {
+                "reply": "No matching emails found to summarize.",
+                "ui_actions": [],
+                "rich_cards": [],
+                "agent_steps": ["Searched inbox (0 matches)"],
+            }
+        bullets = "\n".join(
+            f"- **{m.sender_name}** — *{m.subject}*: {m.snippet[:90]}" for m in items
+        )
+        return {
+            "reply": f"Here is a summary of **{len(items)}** email(s):\n{bullets}",
+            "ui_actions": [
+                {
+                    "type": "apply_filters",
+                    "folder": "inbox",
+                    "sender": sender or "",
+                    "is_read": False if "unread" in lower else None,
+                    "days": _parse_days(lower),
+                    "emails": [m.to_dict(include_body=False) for m in items],
+                }
+            ],
+            "rich_cards": [{"type": "email_preview", "email": m.to_dict(include_body=False)} for m in items[:3]],
+            "agent_steps": [f"Queried {len(items)} email(s)", "Synthesized inbox summary"],
+        }
 
     # 0. Save / remember contact
     if any(k in lower for k in ("save contact", "add contact", "remember ")) and "@" in text:
@@ -310,4 +361,53 @@ def run_fallback_nlu(
         ),
         "ui_actions": [],
         "rich_cards": [],
+    }
+
+
+def run_fallback_nlu(
+    account: MailAccount, message: str, ui_context: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Agentic multi-step NLU planner: splits compound instructions and chains context."""
+    parts = [
+        p.strip()
+        for p in re.split(r"\s*(?:,\s*and\s+then\s+|\s+and\s+then\s+|;\s*|\s+then\s+|\s*,\s*and\s+(?=(?:open|reply|forward|star|move|summarize|summarise|send|draft|save)\b))", message, flags=re.IGNORECASE)
+        if p.strip()
+    ]
+    if len(parts) <= 1:
+        res = _run_single_step(account, message, ui_context)
+        if "agent_steps" not in res:
+            res["agent_steps"] = [
+                a["type"].replace("_", " ").title() for a in res.get("ui_actions", [])
+            ] or ["Analyzed request"]
+        return res
+
+    ctx = dict(ui_context)
+    all_actions = []
+    all_cards = []
+    replies = []
+    steps = []
+
+    for part in parts:
+        step_res = _run_single_step(account, part, ctx)
+        if step_res.get("reply"):
+            replies.append(step_res["reply"])
+        for action in step_res.get("ui_actions", []):
+            all_actions.append(action)
+            if action.get("type") == "open_email" and action.get("email"):
+                ctx["open_email_id"] = action["email"]["id"]
+                ctx["current_view"] = "detail"
+            elif action.get("type") == "apply_filters" and action.get("emails"):
+                ctx["open_email_id"] = action["emails"][0]["id"]
+        all_cards.extend(step_res.get("rich_cards", []))
+        steps.extend(
+            step_res.get("agent_steps")
+            or [a["type"].replace("_", " ").title() for a in step_res.get("ui_actions", [])]
+            or [f"Executed: {part[:32]}"]
+        )
+
+    return {
+        "reply": "\n\n".join(replies),
+        "ui_actions": all_actions,
+        "rich_cards": all_cards,
+        "agent_steps": steps,
     }

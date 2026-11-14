@@ -141,3 +141,15 @@ class AssistantCommandTests(TestCase):
         res_date = self._ask(f"Open the email from Sarah on {yesterday_str}")
         self.assertEqual(res_date["ui_actions"][0]["type"], "open_email")
         self.assertEqual(res_date["ui_actions"][0]["email"]["id"], self.sarah_email.id)
+
+    def test_agentic_multistep_open_summarize_and_reply(self):
+        res = self._ask("Open the latest email from Sarah, and then summarize it, and then reply to it")
+        action_types = [a["type"] for a in res["ui_actions"]]
+        self.assertIn("open_email", action_types)
+        self.assertIn("fill_compose", action_types)
+        self.assertGreaterEqual(len(res["agent_steps"]), 3)
+        self.assertIn("Q4 Project Update", res["reply"])
+
+        fill = next(a for a in res["ui_actions"] if a["type"] == "fill_compose")
+        self.assertEqual(fill["to"], "sarah@nebulaknowlab.com")
+        self.assertEqual(fill["mode"], "reply")

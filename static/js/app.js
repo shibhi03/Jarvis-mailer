@@ -6,6 +6,7 @@ const state = {
   composeDraftId: null,
   composeThreadId: null,
   composeInReplyTo: null,
+  chatHistory: [],
   filters: {
     q: "",
     sender: "",
@@ -332,10 +333,19 @@ async function fetchContacts() {
   });
 }
 
-function appendAssistantMessage(text, richCards = []) {
+function appendAssistantMessage(text, richCards = [], agentSteps = []) {
   const container = document.getElementById("assistant-messages");
   const wrapper = document.createElement("div");
   wrapper.className = "msg msg-assistant";
+
+  if (agentSteps && agentSteps.length) {
+    const stepsEl = document.createElement("div");
+    stepsEl.className = "agent-steps";
+    stepsEl.innerHTML = agentSteps
+      .map((s) => `<span class="agent-step-pill">✓ ${escapeHtml(s)}</span>`)
+      .join("");
+    wrapper.appendChild(stepsEl);
+  }
 
   const bubble = document.createElement("div");
   bubble.className = "msg-bubble";
@@ -402,6 +412,7 @@ async function sendAssistantCommand(message) {
     method: "POST",
     body: JSON.stringify({
       message,
+      history: state.chatHistory.slice(-6),
       ui_context: {
         current_view: state.currentView,
         open_email_id: state.openEmailId,
@@ -410,7 +421,9 @@ async function sendAssistantCommand(message) {
     }),
   });
   await executeUiActions(res.ui_actions || []);
-  appendAssistantMessage(res.reply || "Done.", res.rich_cards || []);
+  const replyText = res.reply || "Done.";
+  appendAssistantMessage(replyText, res.rich_cards || [], res.agent_steps || []);
+  state.chatHistory.push({ role: "user", content: message }, { role: "assistant", content: replyText });
 }
 
 async function loadAuthStatus() {

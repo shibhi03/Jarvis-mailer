@@ -320,3 +320,90 @@ def execute_move_open_email(
     target.folder = target_folder
     target.save(update_fields=["folder"])
     return execute_search_tool(account, folder="inbox")
+
+
+def execute_read_email_detail(
+    account: MailAccount,
+    email_id: Optional[int] = None,
+    sender: Optional[str] = None,
+    q: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read full email & thread data for agent reasoning (without forcing UI navigation)."""
+    target: Optional[EmailMessage] = None
+    if email_id:
+        target = EmailMessage.objects.filter(account=account, id=email_id).first()
+    else:
+        target = query_emails(account, folder="all", sender=sender, q=q).first()
+    if not target:
+        return {"found": False, "error": "No matching email found."}
+    thread = [
+        m.to_dict(include_body=True)
+        for m in EmailMessage.objects.filter(
+            account=account, thread_id=target.thread_id
+        ).order_by("received_at", "id")
+    ]
+    return {"found": True, "email": target.to_dict(include_body=True), "thread": thread}
+
+
+def execute_schedule_tool(
+    account: MailAccount,
+    to: str,
+    subject: str,
+    body: str,
+    scheduled_at: str,
+) -> Dict[str, Any]:
+    import uuid
+    from datetime import datetime
+    from django.utils import timezone
+
+    resolved_to = (to or "").strip()
+    if resolved_to and "@" not in resolved_to:
+        email_addr, _, _ = resolve_recipient(account, resolved_to)
+        if not email_addr:
+            return {
+                "reply": f"I couldn't find **{resolved_to}** in your Contact Book to schedule this email.",
+                "ui_actions": [],
+                "rich_cards": [],
+            }
+        resolved_to = email_addr
+
+    try:
+        dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.get_current_timezone())
+    except ValueError:
+        return {
+            "reply": f"Could not parse scheduled time `{scheduled_at}`. Use ISO format like `2026-11-15T09:00:00`.",
+            "ui_actions": [],
+            "rich_cards": [],
+        }
+
+    msg = EmailMessage.objects.create(
+        account=account,
+        provider_message_id=f"sched-{uuid.uuid4().hex[:10]}",
+        thread_id=f"thread-{uuid.uuid4().hex[:10]}",
+        folder=EmailMessage.FOLDER_SCHEDULED,
+        sender_name=account.display_name or "Me",
+        sender_email=account.email,
+        recipient_email=resolved_to,
+        subject=subject.strip() or "(No subject)",
+        snippet=" ".join(body.split())[:140],
+        body_text=body.strip(),
+        is_read=True,
+        scheduled_at=dt,
+        received_at=timezone.now(),
+    )
+    return {
+        "reply": f"Scheduled email **{msg.subject}** to **{resolved_to}** for `{dt.strftime('%Y-%m-%d %H:%M')}`.",
+        "ui_actions": [
+            {
+                "type": "apply_filters",
+                "folder": "scheduled",
+                "emails": [
+                    m.to_dict(include_body=False)
+                    for m in query_emails(account, folder="scheduled")[:50]
+                ],
+            }
+        ],
+        "rich_cards": [{"type": "email_preview", "email": msg.to_dict(include_body=False)}],
+    }
