@@ -84,6 +84,12 @@ def get_active_account() -> MailAccount:
     if gmail_account:
         return gmail_account
 
+    active_demo = MailAccount.objects.filter(
+        provider=MailAccount.PROVIDER_DEMO, is_active=True
+    ).first()
+    if active_demo:
+        return active_demo
+
     demo_account, _ = MailAccount.objects.get_or_create(
         email="you@jarvismail.dev",
         defaults={
