@@ -173,3 +173,28 @@ class AssistantCommandTests(TestCase):
         self.assertEqual(scheduled_item["recipient_email"], "shibhi@example.com")
         self.assertIn("Dinner", scheduled_item["subject"])
         self.assertIn("dinner", scheduled_item["snippet"].lower())
+
+    def test_write_mail_by_contact_name_and_schedule_timezone_and_expanded_commands(self):
+        Contact.objects.create(account=self.account, name="Shibhi", email="shibhi@example.com")
+
+        # Natural compose by contact name without explicit "subject"/"body" keywords
+        res_write = self._ask("write a mail to shibhi asking him out for dinner tonight")
+        fill = next(a for a in res_write["ui_actions"] if a["type"] == "fill_compose")
+        self.assertEqual(fill["to"], "shibhi@example.com")
+        self.assertIn("Dinner", fill["subject"])
+        self.assertIn("dinner", fill["body"].lower())
+
+        # Schedule time accuracy in IST (tz_offset_minutes = -330)
+        res_sched = self._ask(
+            "schedule a mail to shibhi by 6 pm today, asking him out for dinner tonight",
+            ui_context={"tz_offset_minutes": -330},
+        )
+        self.assertIn("18:00", res_sched["reply"])
+
+        # Expanded UI commands
+        self.assertEqual(self._ask("switch to dark mode")["ui_actions"][0], {"type": "set_theme", "theme": "dark"})
+        self.assertEqual(self._ask("open contacts")["ui_actions"][0], {"type": "navigate_view", "view": "contacts"})
+        self.assertEqual(self._ask("send it")["ui_actions"][0], {"type": "submit_compose"})
+        res_unread = self._ask("mark as unread", ui_context={"open_email_id": self.sarah_email.id})
+        self.assertEqual(res_unread["ui_actions"][0]["type"], "update_read")
+        self.assertFalse(res_unread["ui_actions"][0]["is_read"])

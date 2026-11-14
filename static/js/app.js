@@ -263,6 +263,7 @@ async function executeUiActions(actions = []) {
   for (const action of actions) {
     if (action.type === "navigate_view") {
       switchView(action.view);
+      if (action.view === "contacts") fetchContacts();
     } else if (action.type === "fill_compose") {
       switchView("compose");
       state.composeThreadId = action.thread_id || null;
@@ -300,6 +301,29 @@ async function executeUiActions(actions = []) {
         state.openEmail.is_starred = action.is_starred;
         document.getElementById("btn-star-detail").textContent = action.is_starred ? "★ Starred" : "☆ Star";
       }
+    } else if (action.type === "update_read") {
+      if (state.openEmail && state.openEmail.id === action.id) {
+        state.openEmail.is_read = action.is_read;
+        document.getElementById("btn-toggle-read").textContent = action.is_read ? "Mark Unread" : "Mark Read";
+      }
+    } else if (action.type === "set_theme") {
+      const theme = action.theme === "dark" ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", theme);
+      localStorage.setItem("jarvis_theme", theme);
+    } else if (action.type === "submit_compose") {
+      await sendComposeDraft({
+        draft_id: state.composeDraftId,
+        to: document.getElementById("compose-to").value,
+        subject: document.getElementById("compose-subject").value,
+        body: document.getElementById("compose-body").value,
+        thread_id: state.composeThreadId,
+        in_reply_to: state.composeInReplyTo,
+      });
+      state.composeDraftId = null;
+    } else if (action.type === "discard_compose") {
+      state.composeDraftId = null;
+      switchView(state.folder);
+      fetchEmails();
     }
   }
 }
@@ -422,6 +446,7 @@ async function sendAssistantCommand(message) {
         current_view: state.currentView,
         open_email_id: state.openEmailId,
         active_filters: state.filters,
+        tz_offset_minutes: new Date().getTimezoneOffset(),
       },
     }),
   });

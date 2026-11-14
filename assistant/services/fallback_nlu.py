@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Dict, Optional, Tuple
 
 from django.utils import timezone
@@ -9,16 +9,26 @@ from assistant.services.tools import (
     execute_close_email_tool,
     execute_compose_tool,
     execute_forward_open_email,
+    execute_mark_read_open_email,
     execute_move_open_email,
     execute_open_email_tool,
     execute_read_email_detail,
     execute_reply_open_email,
     execute_save_contact_tool,
+    execute_save_draft_tool,
     execute_schedule_tool,
     execute_search_tool,
     execute_star_open_email,
+    execute_sync_now_tool,
 )
 from mail.services.queries import query_emails
+
+
+def get_client_tz(ui_context: Dict[str, Any]):
+    offset = ui_context.get("tz_offset_minutes")
+    if isinstance(offset, (int, float)):
+        return dt_timezone(timedelta(minutes=-int(offset)))
+    return timezone.get_current_timezone()
 
 MONTH_MAP = {
     "jan": 1, "january": 1,
@@ -54,12 +64,20 @@ def _parse_compose(message: str) -> Optional[Dict[str, str]]:
         to_addr = email_match.group(0)
     else:
         name_match = re.search(
-            r"\b(?:to)\s+([A-Za-z][A-Za-z0-9 .'-]{0,40}?)(?=\s+(?:with\s+subject|subject|about|regarding|with\s+body|body|saying|message|$))",
+            r"\bto\s+([A-Za-z][A-Za-z0-9 .'-]{0,40}?)(?=\s*(?:,|$|\s+(?:with\s+subject|subject|about|regarding|with\s+body|body|saying|message|asking|telling|reminding|thanking|inviting|for|to\s+ask|to\s+tell)\b))",
             message,
             re.IGNORECASE,
         )
+        if not name_match:
+            name_match = re.search(
+                r"^(?:mail|email)\s+(?!from\b|to\b)([A-Za-z][A-Za-z0-9 .'-]{0,40}?)(?=\s*(?:,|$|\s+(?:with\s+subject|subject|about|regarding|with\s+body|body|saying|message|asking|telling|reminding|thanking|inviting|for)\b))",
+                message,
+                re.IGNORECASE,
+            )
         if name_match:
-            to_addr = name_match.group(1).strip()
+            candidate = name_match.group(1).strip()
+            if candidate.lower() not in ("a", "an", "the", "mail", "email", "message"):
+                to_addr = candidate
 
     if not to_addr:
         return None
@@ -100,8 +118,9 @@ def _parse_compose(message: str) -> Optional[Dict[str, str]]:
     }
 
 
-def _parse_schedule_datetime(text: str) -> Optional[str]:
-    now = timezone.localtime()
+def _parse_schedule_datetime(text: str, client_tz=None) -> Optional[str]:
+    tz = client_tz or timezone.get_current_timezone()
+    now = timezone.now().astimezone(tz)
     lower = text.lower()
 
     m_in = re.search(r"\bin\s+(\d+)\s+(minute|minutes|min|hour|hours|hr|hrs)\b", lower)
@@ -131,14 +150,20 @@ def _parse_schedule_datetime(text: str) -> Optional[str]:
             hour += 12
         elif ampm == "am" and hour == 12:
             hour = 0
-    elif "evening" in lower or "tonight" in lower:
+    elif "morning" in lower:
+        hour, minute = 9, 0
+    elif "afternoon" in lower:
+        hour, minute = 14, 0
+    elif "evening" in lower:
         hour, minute = 18, 0
+    elif "tonight" in lower:
+        hour, minute = 20, 0
 
-    if not m_time and "tomorrow" not in lower and "today" not in lower and not _parse_specific_date(lower)[0]:
+    if not m_time and not any(k in lower for k in ("tomorrow", "today", "morning", "afternoon", "evening", "tonight")) and not _parse_specific_date(lower)[0]:
         return None
 
-    dt = datetime(base_date.year, base_date.month, base_date.day, hour, minute)
-    return timezone.make_aware(dt, timezone.get_current_timezone()).isoformat()
+    dt = datetime(base_date.year, base_date.month, base_date.day, hour, minute, tzinfo=tz)
+    return dt.isoformat()
 
 
 def _parse_days(lower: str) -> Optional[int]:
@@ -239,15 +264,32 @@ def _run_single_step(
     if re.fullmatch(r"(?:close(?:\s+(?:this|it|email|mail|the\s+open\s+(?:email|mail)|detail))?|go\s+back)", lower):
         return execute_close_email_tool()
 
+    # Theme & Sync controls
+    if any(k in lower for k in ("dark mode", "dark theme")):
+        return {"reply": "Switched to Dark Mode.", "ui_actions": [{"type": "set_theme", "theme": "dark"}], "rich_cards": []}
+    if any(k in lower for k in ("light mode", "light theme")):
+        return {"reply": "Switched to Light Mode.", "ui_actions": [{"type": "set_theme", "theme": "light"}], "rich_cards": []}
+    if re.search(r"\b(sync|refresh)\b", lower) and any(k in lower for k in ("mail", "email", "inbox", "sync", "refresh")):
+        return execute_sync_now_tool(account)
+
+    # Compose confirm / discard
+    if re.fullmatch(r"(?:send\s+it|send\s+now|confirm\s+send|yes\s+send)", lower):
+        return {"reply": "Sending your drafted email now.", "ui_actions": [{"type": "submit_compose"}], "rich_cards": []}
+    if re.fullmatch(r"(?:discard|cancel\s+compose|clear\s+compose)", lower):
+        return {"reply": "Discarded the compose draft.", "ui_actions": [{"type": "discard_compose"}], "rich_cards": []}
+    if re.fullmatch(r"(?:open\s+|show\s+|go\s+to\s+)?contacts(?:\s+book)?", lower):
+        return {"reply": "Opened your Contact Book.", "ui_actions": [{"type": "navigate_view", "view": "contacts"}], "rich_cards": []}
+
     # Schedule a mail (e.g. "schedule a mail to shibhi by 6 pm today, asking him out for dinner tonight")
     if re.search(r"\bschedule\b", lower) and any(k in lower for k in ("mail", "email", "message")):
+        client_tz = get_client_tz(ui_context)
         m_to = re.search(
             r"\bto\s+([A-Za-z0-9_.+-]+(?:@[A-Za-z0-9.-]+)?)(?=\s+(?:at|by|on|for|today|tomorrow|with|about|,|$))",
             text,
             re.IGNORECASE,
         )
         to_val = m_to.group(1).strip() if m_to else ""
-        sched_iso = _parse_schedule_datetime(text)
+        sched_iso = _parse_schedule_datetime(text, client_tz=client_tz)
         parsed = _parse_compose(text) or {"subject": "", "body": "", "intent": ""}
         if to_val and sched_iso:
             return execute_schedule_tool(
@@ -257,6 +299,7 @@ def _run_single_step(
                 body=parsed.get("body", ""),
                 scheduled_at=sched_iso,
                 intent=parsed.get("intent") or text,
+                client_tz=client_tz,
             )
 
     # Summarize email(s)
@@ -329,11 +372,17 @@ def _run_single_step(
             custom_body = m_say.group(1).strip()
         return execute_reply_open_email(account, open_email_id, custom_body=custom_body)
 
-    # 1b. Star / Spam / Bin actions on open email
+    # 1b. Star / Read / Spam / Bin actions on open email
     if re.search(r"\b(unstar|remove star)\b", lower):
         return execute_star_open_email(account, open_email_id, starred=False)
     if re.search(r"\bstar\b", lower) and not any(w in lower for w in ("starred", "show", "open")):
         return execute_star_open_email(account, open_email_id, starred=True)
+    if re.search(r"\bmark\s+(?:this\s+)?(?:as\s+)?unread\b", lower):
+        return execute_mark_read_open_email(account, open_email_id, is_read=False)
+    if re.search(r"\bmark\s+(?:this\s+)?(?:as\s+)?read\b", lower):
+        return execute_mark_read_open_email(account, open_email_id, is_read=True)
+    if re.search(r"\b(not spam|restore|move to inbox)\b", lower):
+        return execute_move_open_email(account, open_email_id, "inbox")
     if re.search(r"\b(move to spam|mark as spam|spam this)\b", lower):
         return execute_move_open_email(account, open_email_id, "spam")
     if re.search(r"\b(move to bin|move to trash|delete this|trash this)\b", lower):
@@ -349,8 +398,18 @@ def _run_single_step(
             to_addr = m_to.group(1).strip() if m_to else ""
         return execute_forward_open_email(account, open_email_id, to=to_addr)
 
-    # 3. Compose / Send email (supports email OR contact name)
-    if any(k in lower for k in ("send ", "compose ", "write ", "draft ", "email to ", "mail to ")):
+    # 3. Compose / Send / Save Draft email (supports email OR contact name)
+    if "save draft" in lower or "save as draft" in lower:
+        parsed = _parse_compose(text) or {"to": "", "subject": "", "body": "", "intent": text}
+        return execute_save_draft_tool(
+            account,
+            to=parsed["to"],
+            subject=parsed["subject"],
+            body=parsed["body"],
+            intent=parsed.get("intent") or None,
+        )
+
+    if any(k in lower for k in ("send ", "compose ", "write ", "draft ", "email to ", "mail to ")) or re.match(r"^(?:mail|email)\s+(?!from\b)", lower):
         parsed = _parse_compose(text)
         if parsed:
             return execute_compose_tool(

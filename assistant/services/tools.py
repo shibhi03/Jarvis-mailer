@@ -373,6 +373,7 @@ def execute_schedule_tool(
     body: str,
     scheduled_at: str,
     intent: Optional[str] = None,
+    client_tz=None,
 ) -> Dict[str, Any]:
     import uuid
     from datetime import datetime
@@ -403,7 +404,7 @@ def execute_schedule_tool(
     try:
         dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
         if timezone.is_naive(dt):
-            dt = timezone.make_aware(dt, timezone.get_current_timezone())
+            dt = timezone.make_aware(dt, client_tz or timezone.get_current_timezone())
     except ValueError:
         return {
             "reply": f"Could not parse scheduled time `{scheduled_at}`. Use ISO format like `2026-11-15T09:00:00`.",
@@ -426,8 +427,9 @@ def execute_schedule_tool(
         scheduled_at=dt,
         received_at=timezone.now(),
     )
+    display_dt = dt.astimezone(client_tz) if client_tz else dt
     return {
-        "reply": f"Scheduled email **{msg.subject}** to **{resolved_to}** for `{dt.strftime('%Y-%m-%d %H:%M')}`.",
+        "reply": f"Scheduled email **{msg.subject}** to **{resolved_to}** for `{display_dt.strftime('%Y-%m-%d %H:%M')}`.",
         "ui_actions": [
             {
                 "type": "apply_filters",
@@ -440,3 +442,92 @@ def execute_schedule_tool(
         ],
         "rich_cards": [{"type": "email_preview", "email": msg.to_dict(include_body=False)}],
     }
+
+
+def execute_save_draft_tool(
+    account: MailAccount,
+    to: str = "",
+    subject: str = "",
+    body: str = "",
+    intent: Optional[str] = None,
+) -> Dict[str, Any]:
+    import uuid
+    from django.utils import timezone
+
+    resolved_to = (to or "").strip()
+    contact_name = resolved_to
+    if resolved_to and "@" not in resolved_to:
+        email_addr, contact, _ = resolve_recipient(account, resolved_to)
+        if email_addr:
+            contact_name = contact.name if contact else resolved_to
+            resolved_to = email_addr
+
+    final_subject = (subject or "").strip()
+    final_body = (body or "").strip()
+    if intent and (not final_subject or not final_body):
+        ai_subj, ai_body = generate_subject_and_body(contact_name, intent)
+        if not final_subject:
+            final_subject = ai_subj
+        if not final_body:
+            final_body = ai_body
+
+    draft = EmailMessage.objects.create(
+        account=account,
+        provider_message_id=f"draft-{uuid.uuid4().hex[:10]}",
+        thread_id=f"thread-{uuid.uuid4().hex[:10]}",
+        folder=EmailMessage.FOLDER_DRAFTS,
+        sender_name=account.display_name or "Me",
+        sender_email=account.email,
+        recipient_email=resolved_to,
+        subject=final_subject or "(No subject)",
+        snippet=" ".join(final_body.split())[:140],
+        body_text=final_body,
+        is_read=True,
+        received_at=timezone.now(),
+    )
+    return {
+        "reply": f"Saved draft **{draft.subject}**" + (f" to **{resolved_to}**." if resolved_to else "."),
+        "ui_actions": [
+            {
+                "type": "apply_filters",
+                "folder": "drafts",
+                "emails": [
+                    m.to_dict(include_body=False)
+                    for m in query_emails(account, folder="drafts")[:50]
+                ],
+            }
+        ],
+        "rich_cards": [{"type": "email_preview", "email": draft.to_dict(include_body=False)}],
+    }
+
+
+def execute_mark_read_open_email(
+    account: MailAccount, open_email_id: Optional[int], is_read: bool = False
+) -> Dict[str, Any]:
+    if not open_email_id:
+        return {"reply": "Open an email first to change its read status.", "ui_actions": [], "rich_cards": []}
+    target = EmailMessage.objects.filter(account=account, id=open_email_id).first()
+    if not target:
+        return {"reply": "Could not find the open email.", "ui_actions": [], "rich_cards": []}
+    target.is_read = is_read
+    target.save(update_fields=["is_read"])
+    return {
+        "reply": f"Marked **{target.subject}** as {'read' if is_read else 'unread'}.",
+        "ui_actions": [{"type": "update_read", "id": target.id, "is_read": is_read}],
+        "rich_cards": [],
+    }
+
+
+def execute_sync_now_tool(account: MailAccount) -> Dict[str, Any]:
+    from mail.services.contacts import sync_contacts_from_messages
+    from mail.services.provider import get_provider_for_account
+
+    provider = get_provider_for_account(account)
+    try:
+        added = provider.sync_messages(max_results=25)
+    except Exception as exc:
+        return {"reply": f"Sync failed: {exc}", "ui_actions": [], "rich_cards": []}
+    sync_contacts_from_messages(account)
+    res = execute_search_tool(account, folder="inbox")
+    res["reply"] = f"Synced your mailbox ({added} new email(s))."
+    return res

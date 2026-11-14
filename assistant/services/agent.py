@@ -4,19 +4,22 @@ from typing import Any, Dict, List
 from django.conf import settings
 
 from accounts.models import MailAccount
-from assistant.services.fallback_nlu import run_fallback_nlu
+from assistant.services.fallback_nlu import get_client_tz, run_fallback_nlu
 from assistant.services.tools import (
     execute_close_email_tool,
     execute_compose_tool,
     execute_forward_open_email,
+    execute_mark_read_open_email,
     execute_move_open_email,
     execute_open_email_tool,
     execute_read_email_detail,
     execute_reply_open_email,
     execute_save_contact_tool,
+    execute_save_draft_tool,
     execute_schedule_tool,
     execute_search_tool,
     execute_star_open_email,
+    execute_sync_now_tool,
 )
 from mail.models import Contact, EmailMessage
 from mail.services.contacts import resolve_recipient
@@ -203,13 +206,94 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_draft",
+            "description": "Save an email as a draft in the Drafts folder.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mark_read_status",
+            "description": "Mark the currently open email as read or unread.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_id": {"type": "integer"},
+                    "is_read": {"type": "boolean"},
+                },
+                "required": ["is_read"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_theme",
+            "description": "Switch the UI between dark mode and light mode.",
+            "parameters": {
+                "type": "object",
+                "properties": {"theme": {"type": "string", "enum": ["dark", "light"]}},
+                "required": ["theme"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sync_mailbox",
+            "description": "Sync / refresh emails from the connected mail provider.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_contacts",
+            "description": "Navigate the UI to the Contact Book view.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_compose",
+            "description": "Send the email currently filled in the compose form.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discard_compose",
+            "description": "Discard the current compose draft and return to the folder list.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
 def _build_context_summary(account: MailAccount, ui_context: Dict[str, Any]) -> str:
+    from django.utils import timezone
+
+    client_tz = get_client_tz(ui_context)
+    local_now = timezone.now().astimezone(client_tz)
     current_view = ui_context.get("current_view", "inbox")
     open_email_id = ui_context.get("open_email_id")
-    parts = [f"Current UI view: {current_view}"]
+    parts = [
+        f"User local time: {local_now.isoformat()}",
+        f"Current UI view: {current_view}",
+    ]
     if open_email_id:
         email = EmailMessage.objects.filter(account=account, id=open_email_id).first()
         if email:
@@ -243,6 +327,7 @@ def _execute_tool(
             subject=args.get("subject", ""),
             body=args.get("body", ""),
             scheduled_at=args.get("scheduled_at", ""),
+            client_tz=get_client_tz(ui_context),
         )
     if name == "search_emails":
         return execute_search_tool(
@@ -311,6 +396,26 @@ def _execute_tool(
             "ui_actions": [],
             "rich_cards": [],
         }
+    if name == "save_draft":
+        return execute_save_draft_tool(
+            account,
+            to=args.get("to", ""),
+            subject=args.get("subject", ""),
+            body=args.get("body", ""),
+        )
+    if name == "mark_read_status":
+        return execute_mark_read_open_email(account, open_id, is_read=args.get("is_read", False))
+    if name == "set_theme":
+        theme = args.get("theme", "dark")
+        return {"reply": f"Switched to {theme} mode.", "ui_actions": [{"type": "set_theme", "theme": theme}], "rich_cards": []}
+    if name == "sync_mailbox":
+        return execute_sync_now_tool(account)
+    if name == "open_contacts":
+        return {"reply": "Opened your Contact Book.", "ui_actions": [{"type": "navigate_view", "view": "contacts"}], "rich_cards": []}
+    if name == "submit_compose":
+        return {"reply": "Sending your email now.", "ui_actions": [{"type": "submit_compose"}], "rich_cards": []}
+    if name == "discard_compose":
+        return {"reply": "Discarded compose draft.", "ui_actions": [{"type": "discard_compose"}], "rich_cards": []}
     return {"reply": "Done.", "ui_actions": [], "rich_cards": []}
 
 
@@ -388,12 +493,105 @@ def _run_openai_agent(
     }
 
 
+def _run_gemini_agent(
+    account: MailAccount,
+    message: str,
+    ui_context: Dict[str, Any],
+    history: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=settings.GEMINI_API_KEY)
+    declarations = [
+        types.FunctionDeclaration(
+            name=t["function"]["name"],
+            description=t["function"]["description"],
+            parameters_json_schema=t["function"]["parameters"],
+        )
+        for t in OPENAI_TOOLS
+    ]
+    system_prompt = (
+        "You are Jarvis, an autonomous agentic AI co-pilot embedded in a mail web application. "
+        "Convert any natural language user request into the appropriate tool calls in sequence to control the UI, "
+        "manage contacts, compose/draft/schedule/reply/forward/star/move/summarize emails. "
+        "When drafting or scheduling an email from user intent, write a natural subject and body.\n\n"
+        + _build_context_summary(account, ui_context)
+    )
+
+    contents: List[Any] = []
+    for turn in (history or [])[-6:]:
+        role = "model" if turn.get("role") == "assistant" else "user"
+        if turn.get("content"):
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=turn["content"])]))
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=message)]))
+
+    ctx = dict(ui_context)
+    all_actions: List[Dict[str, Any]] = []
+    all_cards: List[Dict[str, Any]] = []
+    agent_steps: List[str] = []
+    last_tool_reply = ""
+
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        tools=[types.Tool(function_declarations=declarations)],
+        temperature=0.1,
+    )
+
+    for _ in range(6):
+        resp = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=contents,
+            config=config,
+        )
+        fn_calls = resp.function_calls or []
+        if not fn_calls:
+            return {
+                "reply": (resp.text or "").strip() or last_tool_reply or "Done.",
+                "ui_actions": all_actions,
+                "rich_cards": all_cards,
+                "agent_steps": agent_steps or ["Completed"],
+            }
+
+        contents.append(resp.candidates[0].content)
+        fn_response_parts = []
+        for fc in fn_calls:
+            args = dict(fc.args or {})
+            result = _execute_tool(account, fc.name, args, ctx)
+            agent_steps.append(fc.name.replace("_", " ").title())
+            all_actions.extend(result.get("ui_actions", []))
+            all_cards.extend(result.get("rich_cards", []))
+            if result.get("reply"):
+                last_tool_reply = result["reply"]
+
+            obs = result.get("observation") or {
+                "reply": result.get("reply", "ok"),
+                "actions": [a["type"] for a in result.get("ui_actions", [])],
+            }
+            fn_response_parts.append(
+                types.Part.from_function_response(name=fc.name, response={"result": obs})
+            )
+        contents.append(types.Content(role="user", parts=fn_response_parts))
+
+    return {
+        "reply": last_tool_reply or "Completed multi-step workflow.",
+        "ui_actions": all_actions,
+        "rich_cards": all_cards,
+        "agent_steps": agent_steps,
+    }
+
+
 def process_assistant_command(
     account: MailAccount,
     message: str,
     ui_context: Dict[str, Any],
     history: List[Dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
+    if settings.GEMINI_API_KEY:
+        try:
+            return _run_gemini_agent(account, message, ui_context, history or [])
+        except Exception:
+            pass
     if settings.OPENAI_API_KEY:
         try:
             return _run_openai_agent(account, message, ui_context, history or [])
