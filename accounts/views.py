@@ -45,6 +45,7 @@ def google_login(request):
         prompt="consent",
     )
     request.session["google_oauth_state"] = state
+    request.session["google_oauth_code_verifier"] = flow.code_verifier
     return redirect(auth_url)
 
 
@@ -63,6 +64,7 @@ def google_callback(request):
         state=request.session.get("google_oauth_state"),
         redirect_uri=settings.GOOGLE_REDIRECT_URI,
     )
+    flow.code_verifier = request.session.get("google_oauth_code_verifier")
     flow.fetch_token(code=code)
     creds = flow.credentials
 
