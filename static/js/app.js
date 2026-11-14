@@ -288,6 +288,11 @@ async function executeUiActions(actions = []) {
       renderEmailList(action.emails || []);
     } else if (action.type === "open_email" && action.email) {
       renderDetailView(action.email, action.thread || [action.email]);
+    } else if (action.type === "close_email") {
+      state.openEmailId = null;
+      state.openEmail = null;
+      switchView(state.folder);
+      fetchEmails();
     } else if (action.type === "refresh_contacts") {
       if (state.currentView === "contacts") fetchContacts();
     } else if (action.type === "update_star") {

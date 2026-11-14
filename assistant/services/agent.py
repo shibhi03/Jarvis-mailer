@@ -6,6 +6,7 @@ from django.conf import settings
 from accounts.models import MailAccount
 from assistant.services.fallback_nlu import run_fallback_nlu
 from assistant.services.tools import (
+    execute_close_email_tool,
     execute_compose_tool,
     execute_forward_open_email,
     execute_move_open_email,
@@ -108,6 +109,14 @@ OPENAI_TOOLS = [
                     "date_to": {"type": "string"},
                 },
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_email",
+            "description": "Close the currently open email detail view and return to the email list.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -268,6 +277,9 @@ def _execute_tool(
         if res.get("ui_actions") and res["ui_actions"][0].get("email"):
             ui_context["open_email_id"] = res["ui_actions"][0]["email"]["id"]
         return res
+    if name == "close_email":
+        ui_context["open_email_id"] = None
+        return execute_close_email_tool()
     if name == "reply_to_open_email":
         return execute_reply_open_email(
             account,

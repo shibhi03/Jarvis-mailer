@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from accounts.models import MailAccount
 from assistant.services.tools import (
+    execute_close_email_tool,
     execute_compose_tool,
     execute_forward_open_email,
     execute_move_open_email,
@@ -13,6 +14,7 @@ from assistant.services.tools import (
     execute_read_email_detail,
     execute_reply_open_email,
     execute_save_contact_tool,
+    execute_schedule_tool,
     execute_search_tool,
     execute_star_open_email,
 )
@@ -80,7 +82,63 @@ def _parse_compose(message: str) -> Optional[Dict[str, str]]:
     if body_match:
         body = next((g for g in body_match.groups() if g is not None), "").strip()
 
-    return {"to": to_addr, "subject": _extract_quoted(subject), "body": _extract_quoted(body)}
+    intent = ""
+    if not subject or not body:
+        m_intent = re.search(
+            r"(?:,\s*|(?:\b(?:asking|telling|reminding|thanking|inviting|regarding|about)\b).*)$",
+            message,
+            re.IGNORECASE,
+        )
+        if m_intent:
+            intent = m_intent.group(0).lstrip(", ").strip()
+
+    return {
+        "to": to_addr,
+        "subject": _extract_quoted(subject),
+        "body": _extract_quoted(body),
+        "intent": intent,
+    }
+
+
+def _parse_schedule_datetime(text: str) -> Optional[str]:
+    now = timezone.localtime()
+    lower = text.lower()
+
+    m_in = re.search(r"\bin\s+(\d+)\s+(minute|minutes|min|hour|hours|hr|hrs)\b", lower)
+    if m_in:
+        val = int(m_in.group(1))
+        unit = m_in.group(2)
+        delta = timedelta(minutes=val) if unit.startswith("min") else timedelta(hours=val)
+        return (now + delta).replace(second=0, microsecond=0).isoformat()
+
+    base_date = now.date()
+    if "tomorrow" in lower:
+        base_date = base_date + timedelta(days=1)
+    else:
+        d_from, _ = _parse_specific_date(lower)
+        if d_from:
+            base_date = datetime.strptime(d_from, "%Y-%m-%d").date()
+
+    hour, minute = 9, 0
+    m_time = re.search(r"\b(?:at|by)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", lower)
+    if not m_time:
+        m_time = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", lower)
+    if m_time:
+        hour = int(m_time.group(1))
+        minute = int(m_time.group(2) or 0)
+        ampm = (m_time.group(3) or "").lower()
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+    elif "evening" in lower or "tonight" in lower:
+        hour, minute = 18, 0
+
+    if not m_time and "tomorrow" not in lower and "today" not in lower and not _parse_specific_date(lower)[0]:
+        return None
+
+    dt = datetime(base_date.year, base_date.month, base_date.day, hour, minute)
+    return timezone.make_aware(dt, timezone.get_current_timezone()).isoformat()
 
 
 def _parse_days(lower: str) -> Optional[int]:
@@ -176,6 +234,30 @@ def _run_single_step(
     text = message.strip()
     lower = text.lower()
     open_email_id = ui_context.get("open_email_id")
+
+    # Close the open email
+    if re.fullmatch(r"(?:close(?:\s+(?:this|it|email|mail|the\s+open\s+(?:email|mail)|detail))?|go\s+back)", lower):
+        return execute_close_email_tool()
+
+    # Schedule a mail (e.g. "schedule a mail to shibhi by 6 pm today, asking him out for dinner tonight")
+    if re.search(r"\bschedule\b", lower) and any(k in lower for k in ("mail", "email", "message")):
+        m_to = re.search(
+            r"\bto\s+([A-Za-z0-9_.+-]+(?:@[A-Za-z0-9.-]+)?)(?=\s+(?:at|by|on|for|today|tomorrow|with|about|,|$))",
+            text,
+            re.IGNORECASE,
+        )
+        to_val = m_to.group(1).strip() if m_to else ""
+        sched_iso = _parse_schedule_datetime(text)
+        parsed = _parse_compose(text) or {"subject": "", "body": "", "intent": ""}
+        if to_val and sched_iso:
+            return execute_schedule_tool(
+                account,
+                to=to_val,
+                subject=parsed.get("subject", ""),
+                body=parsed.get("body", ""),
+                scheduled_at=sched_iso,
+                intent=parsed.get("intent") or text,
+            )
 
     # Summarize email(s)
     if re.search(r"\bsummari[sz]e\b", lower):
@@ -273,10 +355,11 @@ def _run_single_step(
         if parsed:
             return execute_compose_tool(
                 to=parsed["to"],
-                subject=parsed["subject"] or "Hello",
-                body=parsed["body"] or "",
+                subject=parsed["subject"],
+                body=parsed["body"],
                 mode="new",
                 account=account,
+                intent=parsed.get("intent") or None,
             )
         if "compose" in lower:
             return {

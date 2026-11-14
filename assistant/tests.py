@@ -153,3 +153,23 @@ class AssistantCommandTests(TestCase):
         fill = next(a for a in res["ui_actions"] if a["type"] == "fill_compose")
         self.assertEqual(fill["to"], "sarah@nebulaknowlab.com")
         self.assertEqual(fill["mode"], "reply")
+
+    def test_close_open_email_and_ai_draft_and_natural_schedule(self):
+        # Close
+        res_close = self._ask(
+            "close",
+            ui_context={"current_view": "detail", "open_email_id": self.sarah_email.id},
+        )
+        self.assertEqual(res_close["ui_actions"][0]["type"], "close_email")
+
+        # Natural schedule with contact name + AI-generated subject & body
+        Contact.objects.create(account=self.account, name="Shibhi", email="shibhi@example.com")
+        res_sched = self._ask(
+            "schedule a mail to shibhi by 6 pm today, asking him out for dinner tonight"
+        )
+        self.assertEqual(res_sched["ui_actions"][0]["type"], "apply_filters")
+        self.assertEqual(res_sched["ui_actions"][0]["folder"], "scheduled")
+        scheduled_item = res_sched["ui_actions"][0]["emails"][0]
+        self.assertEqual(scheduled_item["recipient_email"], "shibhi@example.com")
+        self.assertIn("Dinner", scheduled_item["subject"])
+        self.assertIn("dinner", scheduled_item["snippet"].lower())

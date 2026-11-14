@@ -1,9 +1,18 @@
 from typing import Any, Dict, List, Optional
 
 from accounts.models import MailAccount
+from assistant.services.drafter import generate_subject_and_body
 from mail.models import EmailMessage
 from mail.services.contacts import resolve_recipient, upsert_contact
 from mail.services.queries import query_emails
+
+
+def execute_close_email_tool() -> Dict[str, Any]:
+    return {
+        "reply": "Closed the open email.",
+        "ui_actions": [{"type": "close_email"}],
+        "rich_cards": [],
+    }
 
 
 def execute_compose_tool(
@@ -14,8 +23,10 @@ def execute_compose_tool(
     thread_id: Optional[str] = None,
     in_reply_to: Optional[str] = None,
     account: Optional[MailAccount] = None,
+    intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     resolved_to = (to or "").strip()
+    contact_name = resolved_to
     contact_note = ""
     if account is not None and resolved_to and "@" not in resolved_to:
         email_addr, contact, _ = resolve_recipient(account, resolved_to)
@@ -28,13 +39,23 @@ def execute_compose_tool(
                 "ui_actions": [],
                 "rich_cards": [],
             }
+        contact_name = contact.name if contact else resolved_to
         contact_note = f" ({contact.name})" if contact else ""
         resolved_to = email_addr
 
+    final_subject = (subject or "").strip()
+    final_body = (body or "").strip()
+    if intent and (not final_subject or not final_body):
+        ai_subj, ai_body = generate_subject_and_body(contact_name, intent)
+        if not final_subject:
+            final_subject = ai_subj
+        if not final_body:
+            final_body = ai_body
+
     draft = {
         "to": resolved_to,
-        "subject": subject.strip(),
-        "body": body.strip(),
+        "subject": final_subject or "Hello",
+        "body": final_body,
         "thread_id": thread_id,
         "in_reply_to": in_reply_to,
         "mode": mode,
@@ -351,21 +372,33 @@ def execute_schedule_tool(
     subject: str,
     body: str,
     scheduled_at: str,
+    intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     import uuid
     from datetime import datetime
     from django.utils import timezone
 
     resolved_to = (to or "").strip()
+    contact_name = resolved_to
     if resolved_to and "@" not in resolved_to:
-        email_addr, _, _ = resolve_recipient(account, resolved_to)
+        email_addr, contact, _ = resolve_recipient(account, resolved_to)
         if not email_addr:
             return {
                 "reply": f"I couldn't find **{resolved_to}** in your Contact Book to schedule this email.",
                 "ui_actions": [],
                 "rich_cards": [],
             }
+        contact_name = contact.name if contact else resolved_to
         resolved_to = email_addr
+
+    final_subject = (subject or "").strip()
+    final_body = (body or "").strip()
+    if intent and (not final_subject or not final_body):
+        ai_subj, ai_body = generate_subject_and_body(contact_name, intent)
+        if not final_subject:
+            final_subject = ai_subj
+        if not final_body:
+            final_body = ai_body
 
     try:
         dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
@@ -386,9 +419,9 @@ def execute_schedule_tool(
         sender_name=account.display_name or "Me",
         sender_email=account.email,
         recipient_email=resolved_to,
-        subject=subject.strip() or "(No subject)",
-        snippet=" ".join(body.split())[:140],
-        body_text=body.strip(),
+        subject=final_subject or "(No subject)",
+        snippet=" ".join(final_body.split())[:140],
+        body_text=final_body,
         is_read=True,
         scheduled_at=dt,
         received_at=timezone.now(),
