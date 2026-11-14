@@ -1,0 +1,156 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jarvis Mailer — AI-Controlled Mail Client</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Left Navigation Rail -->
+    <aside class="nav-rail">
+      <div class="brand">
+        <div class="brand-icon">J</div>
+        <div>
+          <div class="brand-name">Jarvis Mailer</div>
+          <div class="brand-sub">AI-Driven Inbox</div>
+        </div>
+      </div>
+
+      <button id="btn-compose" class="btn btn-primary btn-compose">+ Compose</button>
+
+      <nav class="nav-links">
+        <button id="nav-inbox" class="nav-item active" data-folder="inbox">
+          <span>Inbox</span>
+          <span id="unread-badge" class="badge hidden">0</span>
+        </button>
+        <button id="nav-sent" class="nav-item" data-folder="sent">
+          <span>Sent</span>
+        </button>
+      </nav>
+
+      <div class="nav-footer">
+        <div id="account-card" class="account-card">
+          <div id="account-email" class="account-email">Loading...</div>
+          <div id="account-provider" class="account-provider">Demo Mode</div>
+          <div class="account-actions">
+            <a id="btn-connect-gmail" href="/auth/google/login/" class="btn btn-sm btn-outline hidden">Connect Gmail</a>
+            <button id="btn-disconnect-gmail" class="btn btn-sm btn-outline hidden">Disconnect</button>
+          </div>
+        </div>
+
+        <button id="btn-simulate-push" class="btn btn-sm btn-ghost" title="Simulate an incoming real-time push email">
+          ⚡ Simulate Push Email
+        </button>
+        <button id="btn-theme-toggle" class="btn btn-sm btn-ghost">
+          🌙 Toggle Dark Mode
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Mail Workspace -->
+    <main class="main-workspace">
+      <header class="filter-bar">
+        <input id="filter-q" type="search" class="input" placeholder="Search subject, body, sender..." />
+        <input id="filter-sender" type="text" class="input input-sm" placeholder="Sender..." />
+        <select id="filter-read" class="select">
+          <option value="">All status</option>
+          <option value="false">Unread</option>
+          <option value="true">Read</option>
+        </select>
+        <select id="filter-days" class="select">
+          <option value="">Any time</option>
+          <option value="1">Today</option>
+          <option value="7">Last 7 days</option>
+          <option value="10">Last 10 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+        <button id="btn-clear-filters" class="btn btn-sm btn-ghost">Clear</button>
+      </header>
+
+      <!-- List View (Inbox / Sent) -->
+      <section id="view-list" class="workspace-view active">
+        <div class="view-header">
+          <h2 id="list-title">Inbox</h2>
+          <span id="list-count" class="muted">0 emails</span>
+        </div>
+        <div id="email-list" class="email-list"></div>
+      </section>
+
+      <!-- Detail & Thread View -->
+      <section id="view-detail" class="workspace-view">
+        <div class="detail-toolbar">
+          <button id="btn-back-list" class="btn btn-sm btn-outline">← Back</button>
+          <div class="detail-actions">
+            <button id="btn-reply" class="btn btn-sm btn-primary">Reply</button>
+            <button id="btn-forward" class="btn btn-sm btn-outline">Forward</button>
+            <button id="btn-toggle-read" class="btn btn-sm btn-ghost">Mark Unread</button>
+          </div>
+        </div>
+        <h2 id="detail-subject" class="detail-subject"></h2>
+        <div id="thread-container" class="thread-container"></div>
+      </section>
+
+      <!-- Compose View -->
+      <section id="view-compose" class="workspace-view">
+        <div class="view-header">
+          <h2 id="compose-title">New Message</h2>
+          <button id="btn-discard-compose" class="btn btn-sm btn-ghost">Discard</button>
+        </div>
+        <form id="compose-form" class="compose-form">
+          <label class="field">
+            <span>To</span>
+            <input id="compose-to" type="email" class="input" placeholder="recipient@example.com" required />
+          </label>
+          <label class="field">
+            <span>Subject</span>
+            <input id="compose-subject" type="text" class="input" placeholder="Subject" required />
+          </label>
+          <label class="field">
+            <span>Message</span>
+            <textarea id="compose-body" class="textarea" rows="12" placeholder="Write your message..."></textarea>
+          </label>
+          <div class="compose-footer">
+            <button type="submit" id="btn-send-email" class="btn btn-primary">Send Email</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <!-- Right AI Assistant Panel -->
+    <aside class="assistant-panel">
+      <div class="assistant-header">
+        <div>
+          <div class="assistant-title">Jarvis Co-Pilot</div>
+          <div id="assistant-context-pill" class="context-pill">Context: Inbox</div>
+        </div>
+      </div>
+
+      <div class="quick-prompts">
+        <button class="chip" data-prompt="Show only unread emails from this week">Unread this week</button>
+        <button class="chip" data-prompt="Find the email from Sarah about the project update">Find Sarah's update</button>
+        <button class="chip" data-prompt="Open the latest email from David">Open David's latest</button>
+        <button class="chip" data-prompt="Send an email to john@example.com with subject 'Meeting Tomorrow' and body 'Let's meet at 3pm'">Draft to John</button>
+      </div>
+
+      <div id="assistant-messages" class="assistant-messages">
+        <div class="msg msg-assistant">
+          <div class="msg-bubble">
+            Hi! I'm <strong>Jarvis</strong>. Tell me what to do and I'll drive the mail UI for you — compose emails, filter your inbox, open threads, or reply to the email you're reading.
+          </div>
+        </div>
+      </div>
+
+      <form id="assistant-form" class="assistant-input-bar">
+        <input id="assistant-input" type="text" class="input" placeholder="Ask Jarvis to control the UI..." autocomplete="off" />
+        <button type="submit" class="btn btn-primary">Run</button>
+      </form>
+    </aside>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+  <script src="{% static 'js/app.js' %}"></script>
+</body>
+</html>
