@@ -65,3 +65,31 @@ class EmailMessage(models.Model):
             data["body_text"] = self.body_text
             data["body_html"] = self.body_html
         return data
+
+
+class Contact(models.Model):
+    account = models.ForeignKey(
+        MailAccount,
+        on_delete=models.CASCADE,
+        related_name="contacts",
+    )
+    name = models.CharField(max_length=255, db_index=True)
+    email = models.EmailField()
+    notes = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "email"]
+        unique_together = [("account", "email")]
+
+    def __str__(self) -> str:
+        return f"{self.name} <{self.email}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "email": self.email,
+            "notes": self.notes,
+        }

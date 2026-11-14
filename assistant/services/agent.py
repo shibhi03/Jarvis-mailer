@@ -10,9 +10,10 @@ from assistant.services.tools import (
     execute_forward_open_email,
     execute_open_email_tool,
     execute_reply_open_email,
+    execute_save_contact_tool,
     execute_search_tool,
 )
-from mail.models import EmailMessage
+from mail.models import Contact, EmailMessage
 
 OPENAI_TOOLS = [
     {
@@ -52,14 +53,32 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "open_email",
-            "description": "Navigate to and open a specific email in the detail view.",
+            "description": "Navigate to and open a specific email (e.g. latest email, by sender name, or by date) in the detail view.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sender": {"type": "string"},
                     "q": {"type": "string"},
                     "folder": {"type": "string", "enum": ["inbox", "sent", "all"]},
+                    "days": {"type": "integer"},
+                    "date_from": {"type": "string", "description": "YYYY-MM-DD"},
+                    "date_to": {"type": "string", "description": "YYYY-MM-DD"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_contact",
+            "description": "Save a person's name and email address to the Contact Book.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                },
+                "required": ["name", "email"],
             },
         },
     },
@@ -105,6 +124,9 @@ def _build_context_summary(account: MailAccount, ui_context: Dict[str, Any]) -> 
             )
     if ui_context.get("active_filters"):
         parts.append(f"Active filters: {json.dumps(ui_context['active_filters'])}")
+    contacts = list(Contact.objects.filter(account=account).values_list("name", "email")[:20])
+    if contacts:
+        parts.append("Known contacts: " + ", ".join(f"{n} <{e}>" for n, e in contacts))
     return "\n".join(parts)
 
 
@@ -116,6 +138,7 @@ def _dispatch_tool(
             to=args.get("to", ""),
             subject=args.get("subject", ""),
             body=args.get("body", ""),
+            account=account,
         )
     if name == "search_emails":
         return execute_search_tool(
@@ -132,6 +155,15 @@ def _dispatch_tool(
             sender=args.get("sender"),
             q=args.get("q"),
             folder=args.get("folder"),
+            days=args.get("days"),
+            date_from=args.get("date_from"),
+            date_to=args.get("date_to"),
+        )
+    if name == "save_contact":
+        return execute_save_contact_tool(
+            account,
+            name=args.get("name", ""),
+            email=args.get("email", ""),
         )
     if name == "reply_to_open_email":
         return execute_reply_open_email(

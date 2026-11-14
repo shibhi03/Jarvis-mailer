@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional
 
 from accounts.models import MailAccount
 from mail.models import EmailMessage
+from mail.services.contacts import resolve_recipient, upsert_contact
 from mail.services.queries import query_emails
 
 
@@ -12,9 +13,26 @@ def execute_compose_tool(
     mode: str = "new",
     thread_id: Optional[str] = None,
     in_reply_to: Optional[str] = None,
+    account: Optional[MailAccount] = None,
 ) -> Dict[str, Any]:
+    resolved_to = (to or "").strip()
+    contact_note = ""
+    if account is not None and resolved_to and "@" not in resolved_to:
+        email_addr, contact, _ = resolve_recipient(account, resolved_to)
+        if not email_addr:
+            return {
+                "reply": (
+                    f"I couldn't find **{resolved_to}** in your Contact Book. "
+                    f"Please provide their email address (or say *\"Save contact {resolved_to} name@example.com\"*)."
+                ),
+                "ui_actions": [],
+                "rich_cards": [],
+            }
+        contact_note = f" ({contact.name})" if contact else ""
+        resolved_to = email_addr
+
     draft = {
-        "to": to.strip(),
+        "to": resolved_to,
         "subject": subject.strip(),
         "body": body.strip(),
         "thread_id": thread_id,
@@ -23,7 +41,7 @@ def execute_compose_tool(
     }
     return {
         "reply": (
-            f"I've opened the compose view and filled in your {mode} email to **{draft['to']}**. "
+            f"I've opened the compose view and filled in your {mode} email to **{draft['to']}**{contact_note}. "
             "Please review it and confirm when you're ready to send."
         ),
         "ui_actions": [
@@ -110,13 +128,34 @@ def execute_open_email_tool(
     sender: Optional[str] = None,
     q: Optional[str] = None,
     folder: Optional[str] = None,
+    days: Optional[int] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
 ) -> Dict[str, Any]:
     target: Optional[EmailMessage] = None
     if email_id:
         target = EmailMessage.objects.filter(account=account, id=email_id).first()
     else:
-        qs = query_emails(account, folder=folder or "all", sender=sender, q=q)
+        qs = query_emails(
+            account,
+            folder=folder or "inbox",
+            sender=sender,
+            q=q,
+            days=days,
+            date_from=date_from,
+            date_to=date_to,
+        )
         target = qs.first()
+        if not target and not folder:
+            target = query_emails(
+                account,
+                folder="all",
+                sender=sender,
+                q=q,
+                days=days,
+                date_from=date_from,
+                date_to=date_to,
+            ).first()
 
     if not target:
         return {
@@ -227,4 +266,22 @@ def execute_forward_open_email(
         subject=subject,
         body=body,
         mode="forward",
+        account=account,
     )
+
+
+def execute_save_contact_tool(
+    account: MailAccount, name: str, email: str
+) -> Dict[str, Any]:
+    contact = upsert_contact(account, name=name, email=email)
+    if not contact:
+        return {
+            "reply": "Please provide a valid email address to save to the Contact Book.",
+            "ui_actions": [],
+            "rich_cards": [],
+        }
+    return {
+        "reply": f"Saved **{contact.name}** (`{contact.email}`) to your Contact Book.",
+        "ui_actions": [{"type": "refresh_contacts"}],
+        "rich_cards": [],
+    }

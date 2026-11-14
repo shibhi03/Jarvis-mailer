@@ -24,7 +24,12 @@ async function apiFetch(url, options = {}) {
     headers["X-CSRFToken"] = getCookie("csrftoken");
   }
   const resp = await fetch(url, { ...options, headers });
-  return resp.json();
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: `Server error (${resp.status})` };
+  }
 }
 
 function showToast(text) {
@@ -65,15 +70,20 @@ function updateContextPill() {
 function switchView(viewName) {
   state.currentView = viewName;
   document.querySelectorAll(".workspace-view").forEach((el) => el.classList.remove("active"));
+  document.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("active"));
+
   if (viewName === "detail") {
     document.getElementById("view-detail").classList.add("active");
   } else if (viewName === "compose") {
     document.getElementById("view-compose").classList.add("active");
+  } else if (viewName === "contacts") {
+    document.getElementById("view-contacts").classList.add("active");
+    document.getElementById("nav-contacts").classList.add("active");
   } else {
     state.folder = viewName === "sent" ? "sent" : "inbox";
     document.getElementById("view-list").classList.add("active");
     document.getElementById("list-title").textContent = state.folder === "sent" ? "Sent" : "Inbox";
-    document.querySelectorAll(".nav-item").forEach((b) => {
+    document.querySelectorAll(".nav-item[data-folder]").forEach((b) => {
       b.classList.toggle("active", b.dataset.folder === state.folder);
     });
   }
@@ -229,8 +239,44 @@ async function executeUiActions(actions = []) {
       renderEmailList(action.emails || []);
     } else if (action.type === "open_email" && action.email) {
       renderDetailView(action.email, action.thread || [action.email]);
+    } else if (action.type === "refresh_contacts") {
+      if (state.currentView === "contacts") fetchContacts();
     }
   }
+}
+
+async function fetchContacts() {
+  const data = await apiFetch("/api/contacts/");
+  const listEl = document.getElementById("contacts-list");
+  const contacts = data.contacts || [];
+  if (!contacts.length) {
+    listEl.innerHTML = `<div class="rich-card">No contacts saved yet. Add one above or tell Jarvis "Save contact Name email@example.com".</div>`;
+    return;
+  }
+  listEl.innerHTML = contacts
+    .map(
+      (c) => `
+      <div class="email-row" style="grid-template-columns: 180px 1fr auto;">
+        <span class="email-sender"><strong>${escapeHtml(c.name)}</strong></span>
+        <span class="muted">${escapeHtml(c.email)}</span>
+        <span style="display:flex;gap:6px;">
+          <button class="btn btn-sm btn-primary btn-email-contact" data-email="${escapeHtml(c.email)}">Email</button>
+          <button class="btn btn-sm btn-ghost btn-del-contact" data-id="${c.id}">Delete</button>
+        </span>
+      </div>
+    `
+    )
+    .join("");
+
+  listEl.querySelectorAll(".btn-email-contact").forEach((btn) => {
+    btn.addEventListener("click", () => openCompose({ to: btn.dataset.email }));
+  });
+  listEl.querySelectorAll(".btn-del-contact").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await apiFetch(`/api/contacts/${btn.dataset.id}/`, { method: "DELETE" });
+      fetchContacts();
+    });
+  });
 }
 
 function appendAssistantMessage(text, richCards = []) {
@@ -364,9 +410,32 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.addEventListener("click", () => {
       state.openEmailId = null;
       state.openEmail = null;
-      switchView(btn.dataset.folder);
-      fetchEmails();
+      if (btn.dataset.view === "contacts") {
+        switchView("contacts");
+        fetchContacts();
+      } else {
+        switchView(btn.dataset.folder);
+        fetchEmails();
+      }
     });
+  });
+
+  document.getElementById("contact-add-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = document.getElementById("contact-name").value.trim();
+    const email = document.getElementById("contact-email").value.trim();
+    const res = await apiFetch("/api/contacts/", {
+      method: "POST",
+      body: JSON.stringify({ name, email }),
+    });
+    if (res.contact) {
+      showToast(`Saved ${res.contact.name}`);
+      document.getElementById("contact-name").value = "";
+      document.getElementById("contact-email").value = "";
+      fetchContacts();
+    } else {
+      showToast(res.error || "Failed to save contact");
+    }
   });
 
   document.getElementById("btn-compose").addEventListener("click", () => openCompose());

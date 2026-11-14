@@ -47,6 +47,10 @@ class GmailMailProvider(BaseMailProvider):
     """Google Gmail API integration with OAuth2 & Pub/Sub incremental sync."""
 
     def _get_credentials(self) -> Credentials:
+        expiry = self.account.token_expiry
+        if expiry is not None and expiry.tzinfo is not None:
+            expiry = expiry.astimezone(dt_timezone.utc).replace(tzinfo=None)
+
         creds = Credentials(
             token=self.account.access_token or None,
             refresh_token=self.account.refresh_token or None,
@@ -54,11 +58,15 @@ class GmailMailProvider(BaseMailProvider):
             client_id=settings.GOOGLE_CLIENT_ID,
             client_secret=settings.GOOGLE_CLIENT_SECRET,
             scopes=settings.GMAIL_SCOPES,
+            expiry=expiry,
         )
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
             self.account.access_token = creds.token or ""
-            self.account.token_expiry = creds.expiry
+            new_expiry = creds.expiry
+            if new_expiry is not None and new_expiry.tzinfo is None:
+                new_expiry = new_expiry.replace(tzinfo=dt_timezone.utc)
+            self.account.token_expiry = new_expiry
             self.account.save(update_fields=["access_token", "token_expiry", "updated_at"])
         return creds
 
@@ -191,7 +199,7 @@ class GmailMailProvider(BaseMailProvider):
 
         raw_encoded = base64.urlsafe_b64encode(mime_msg.as_bytes()).decode("utf-8")
         send_body = {"raw": raw_encoded}
-        if thread_id:
+        if thread_id and not str(thread_id).startswith("thread-"):
             send_body["threadId"] = thread_id
 
         result = service.users().messages().send(userId="me", body=send_body).execute()

@@ -5,7 +5,7 @@ from django.test import Client, TestCase
 from django.utils import timezone
 
 from accounts.models import MailAccount
-from mail.models import EmailMessage
+from mail.models import Contact, EmailMessage
 
 
 class AssistantCommandTests(TestCase):
@@ -117,3 +117,27 @@ class AssistantCommandTests(TestCase):
         self.assertFalse(action["is_read"])
         self.assertEqual(action["days"], 7)
         self.assertEqual(len(action["emails"]), 2)
+
+    def test_contact_book_save_and_compose_by_name(self):
+        res_save = self._ask("Save contact Alice alice@example.com")
+        self.assertIn("Alice", res_save["reply"])
+        self.assertTrue(
+            Contact.objects.filter(account=self.account, email="alice@example.com").exists()
+        )
+
+        res_compose = self._ask(
+            "Send an email to Alice with subject 'Coffee' and body 'Free at 4pm?'"
+        )
+        fill = next(a for a in res_compose["ui_actions"] if a["type"] == "fill_compose")
+        self.assertEqual(fill["to"], "alice@example.com")
+        self.assertEqual(fill["subject"], "Coffee")
+
+    def test_open_latest_mail_and_by_date(self):
+        res_latest = self._ask("Open the latest mail")
+        self.assertEqual(res_latest["ui_actions"][0]["type"], "open_email")
+        self.assertEqual(res_latest["ui_actions"][0]["email"]["id"], self.david_latest.id)
+
+        yesterday_str = (timezone.localdate() - timedelta(days=1)).isoformat()
+        res_date = self._ask(f"Open the email from Sarah on {yesterday_str}")
+        self.assertEqual(res_date["ui_actions"][0]["type"], "open_email")
+        self.assertEqual(res_date["ui_actions"][0]["email"]["id"], self.sarah_email.id)
