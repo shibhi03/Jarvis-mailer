@@ -1755,6 +1755,14 @@ async function sendAssistantCommand(message) {
 
 async function loadAuthStatus() {
   const status = await apiFetch("/auth/status/");
+  if (status.error) {
+    showToast(`Backend Error: ${status.error}`);
+    const providerEl = document.getElementById("account-provider");
+    if (providerEl) {
+      providerEl.textContent = "Database Connection Error (500)";
+      providerEl.style.color = "var(--color-danger, #ef4444)";
+    }
+  }
   const displayName = status.display_name || status.email || "Jarvis User";
   const nameEl = document.getElementById("account-name");
   const avatarEl = document.getElementById("account-avatar");
