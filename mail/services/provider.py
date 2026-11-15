@@ -26,6 +26,8 @@ class BaseMailProvider(ABC):
         body: str,
         thread_id: Optional[str] = None,
         in_reply_to: Optional[str] = None,
+        cc: str = "",
+        bcc: str = "",
     ) -> EmailMessage:
         """Send an email via the provider and store it in Sent."""
 
@@ -47,6 +49,8 @@ class DemoMailProvider(BaseMailProvider):
         body: str,
         thread_id: Optional[str] = None,
         in_reply_to: Optional[str] = None,
+        cc: str = "",
+        bcc: str = "",
     ) -> EmailMessage:
         now = timezone.now()
         msg_id = f"demo-{uuid.uuid4().hex[:12]}"
@@ -61,6 +65,8 @@ class DemoMailProvider(BaseMailProvider):
             sender_name=self.account.display_name or "Jarvis User",
             sender_email=self.account.email,
             recipient_email=to.strip(),
+            cc_email=(cc or "").strip(),
+            bcc_email=(bcc or "").strip(),
             subject=subject.strip() or "(No subject)",
             snippet=snippet,
             body_text=body,

@@ -3,11 +3,13 @@ import json
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from assistant.models import AssistantConversation, AssistantMessage
 from assistant.services.agent import process_assistant_command
 from mail.services.provider import get_active_account
+from mail.views import parse_request_data
 
 
 def _conversation_dict(conversation):
@@ -46,12 +48,12 @@ def _latest_chat_context(history):
             elif action.get("type") == "fill_compose":
                 context["current_view"] = "compose"
                 context["compose_draft"] = {
-                    key: action.get(key, "") for key in ("to", "subject", "body")
+                    key: action.get(key, "") for key in ("to", "cc", "bcc", "subject", "body", "scheduled_at")
                 }
             elif action.get("type") == "update_compose_draft":
                 context["current_view"] = "compose"
                 context["compose_draft"] = {
-                    key: action.get(key, "") for key in ("to", "subject", "body")
+                    key: action.get(key, "") for key in ("to", "cc", "bcc", "subject", "body", "scheduled_at")
                 }
         return context
     return {}
@@ -64,6 +66,7 @@ def chats_list(request):
     return JsonResponse({"chats": [_conversation_dict(chat) for chat in chats]})
 
 
+@csrf_exempt
 @require_POST
 def chats_create(request):
     account = get_active_account()
@@ -92,11 +95,12 @@ def chat_detail(request, conversation_id: int):
     return JsonResponse({"chat": _conversation_dict(conversation), "messages": messages})
 
 
+@csrf_exempt
 @require_POST
 def assistant_command(request):
     try:
-        payload = json.loads(request.body.decode("utf-8"))
-    except json.JSONDecodeError:
+        payload = parse_request_data(request)
+    except ValueError:
         return JsonResponse({"error": "Invalid JSON body"}, status=400)
 
     message = (payload.get("message") or "").strip()
@@ -145,5 +149,14 @@ def assistant_command(request):
     )
     conversation.updated_at = timezone.now()
     conversation.save(update_fields=["title", "updated_at"])
-    result["conversation_id"] = conversation.id
+    if any(action.get("type") == "new_chat" for action in result.get("ui_actions", [])):
+        new_conv = AssistantConversation.objects.create(account=account)
+        new_chat_dict = _conversation_dict(new_conv)
+        for action in result.get("ui_actions", []):
+            if action.get("type") == "new_chat":
+                action["chat"] = new_chat_dict
+        result["new_chat"] = new_chat_dict
+        result["conversation_id"] = new_conv.id
+    else:
+        result["conversation_id"] = conversation.id
     return JsonResponse(result)

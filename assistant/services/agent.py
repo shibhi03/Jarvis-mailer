@@ -7,34 +7,57 @@ from django.conf import settings
 from accounts.models import MailAccount
 from assistant.services.fallback_nlu import get_client_tz, is_local_ui_intent, run_fallback_nlu
 from assistant.services.tools import (
+    execute_clear_bin_tool,
     execute_close_email_tool,
     execute_compose_tool,
+    execute_create_calendar_event_tool,
+    execute_delete_calendar_event_tool,
+    execute_delete_contact_tool,
+    execute_delete_email_tool,
+    execute_disconnect_gmail_tool,
+    execute_edit_calendar_event_tool,
+    execute_edit_contact_tool,
     execute_forward_open_email,
+    execute_list_calendar_events_tool,
     execute_mark_read_open_email,
     execute_move_open_email,
+    execute_new_chat_tool,
     execute_open_email_tool,
     execute_read_email_detail,
     execute_reply_open_email,
+    execute_restore_email_tool,
     execute_save_contact_tool,
     execute_save_draft_tool,
     execute_schedule_tool,
     execute_search_tool,
+    execute_simulate_incoming_tool,
     execute_star_open_email,
     execute_sync_now_tool,
+    execute_trigger_ui_button_tool,
+    execute_user_profile_tool,
 )
-from mail.models import Contact, EmailMessage
+from mail.models import CalendarEvent, Contact, EmailMessage
 from mail.services.contacts import resolve_recipient
+
+DRAFTING_TOOLS = {
+    "compose_email",
+    "reply_to_open_email",
+    "forward_open_email",
+    "schedule_email",
+}
 
 OPENAI_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "compose_email",
-            "description": "Open the compose UI and visibly fill in recipient (email or contact name), subject, and body.",
+            "description": "Draft a new email in the compose UI with one or more To, optional CC, optional BCC recipients, subject, and body, and show a confirmation card. Use this when the user asks to draft, compose, write, or send an email. NEVER call submit_compose in the same turn; always wait for user confirmation.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "to": {"type": "string"},
+                    "to": {"type": "string", "description": "One or more recipient emails or contact names (comma-separated for multiple recipients)."},
+                    "cc": {"type": "string", "description": "Optional CC recipient emails or contact names (comma-separated)."},
+                    "bcc": {"type": "string", "description": "Optional BCC recipient emails or contact names (comma-separated)."},
                     "subject": {"type": "string"},
                     "body": {"type": "string"},
                 },
@@ -46,11 +69,13 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "schedule_email",
-            "description": "Schedule an email to be sent at a future ISO datetime (e.g. 2026-11-15T09:00:00).",
+            "description": "Prepare a scheduled email draft in the compose UI with one or more recipients (To, optional CC/BCC) and a future ISO datetime, and show a scheduling confirmation card. Always wait for user confirmation before scheduling.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "to": {"type": "string"},
+                    "to": {"type": "string", "description": "One or more recipient emails or contact names (comma-separated for multiple recipients)."},
+                    "cc": {"type": "string", "description": "Optional CC recipient emails or contact names (comma-separated)."},
+                    "bcc": {"type": "string", "description": "Optional BCC recipient emails or contact names (comma-separated)."},
                     "subject": {"type": "string"},
                     "body": {"type": "string"},
                     "scheduled_at": {"type": "string"},
@@ -127,7 +152,7 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "reply_to_open_email",
-            "description": "Pre-fill a reply to the currently open email in the detail view.",
+            "description": "Pre-fill a reply draft to the currently open email in the compose UI and wait for user confirmation before sending.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -141,12 +166,12 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "forward_open_email",
-            "description": "Forward the currently open email to a recipient name or email.",
+            "description": "Pre-fill a forward draft of the currently open email in the compose UI and wait for user confirmation before sending.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "email_id": {"type": "integer"},
-                    "to": {"type": "string"},
+                    "to": {"type": "string", "description": "One or more recipient emails or contact names (comma-separated for multiple recipients)."},
                 },
             },
         },
@@ -169,12 +194,18 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "move_email",
-            "description": "Move an email to inbox, spam, or bin.",
+            "description": "Move one or more emails to inbox, spam, or bin (by open email, email_id, subject, sender/contact name, or email address).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "email_id": {"type": "integer"},
-                    "folder": {"type": "string", "enum": ["inbox", "spam", "bin"]},
+                    "folder": {"type": "string", "enum": ["inbox", "spam", "bin", "restore"]},
+                    "subject": {"type": "string"},
+                    "sender": {"type": "string"},
+                    "email_address": {"type": "string"},
+                    "name": {"type": "string"},
+                    "q": {"type": "string"},
+                    "move_all": {"type": "boolean"},
                 },
                 "required": ["folder"],
             },
@@ -211,11 +242,13 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "save_draft",
-            "description": "Save an email as a draft in the Drafts folder.",
+            "description": "Save an email directly into the Drafts folder (use compose_email instead when the user wants to draft an email interactively in Compose and confirm before sending).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "to": {"type": "string"},
+                    "to": {"type": "string", "description": "One or more recipient emails or contact names (comma-separated for multiple recipients)."},
+                    "cc": {"type": "string", "description": "Optional CC recipient emails or contact names (comma-separated)."},
+                    "bcc": {"type": "string", "description": "Optional BCC recipient emails or contact names (comma-separated)."},
                     "subject": {"type": "string"},
                     "body": {"type": "string"},
                 },
@@ -269,7 +302,7 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "submit_compose",
-            "description": "Send the email currently filled in the compose form.",
+            "description": "Send an email that was ALREADY drafted in an earlier turn ONLY when the user explicitly confirms sending (e.g. 'send it', 'confirm send', 'yes send'). Never call this in the same turn that drafts, replies, forwards, or schedules an email.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -278,6 +311,253 @@ OPENAI_TOOLS = [
         "function": {
             "name": "discard_compose",
             "description": "Discard the current compose draft and return to the folder list.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_email",
+            "description": "Move matching emails to Bin (by subject, email address/ID, sender/contact name, or query), or permanently delete scheduled, draft, or bin emails (or when permanent=true).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_id": {"type": "integer"},
+                    "folder": {
+                        "type": "string",
+                        "enum": ["inbox", "sent", "drafts", "scheduled", "spam", "bin", "all"],
+                    },
+                    "subject": {"type": "string"},
+                    "sender": {"type": "string"},
+                    "recipient": {"type": "string"},
+                    "email_address": {"type": "string"},
+                    "name": {"type": "string"},
+                    "q": {"type": "string"},
+                    "permanent": {"type": "boolean"},
+                    "delete_all": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restore_email",
+            "description": "Restore one or more emails from the Bin folder back to Inbox (by open email, email_id, subject, email address, or sender/contact name).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_id": {"type": "integer"},
+                    "subject": {"type": "string"},
+                    "sender": {"type": "string"},
+                    "email_address": {"type": "string"},
+                    "name": {"type": "string"},
+                    "q": {"type": "string"},
+                    "restore_all": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_bin",
+            "description": "Permanently delete all emails in the Bin folder.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_contact",
+            "description": "Edit an existing contact's name, email address, or notes in the Contact Book.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_id": {"type": "integer"},
+                    "target_name": {"type": "string"},
+                    "target_email": {"type": "string"},
+                    "new_name": {"type": "string"},
+                    "new_email": {"type": "string"},
+                    "new_notes": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calendar_events",
+            "description": "Open the Calendar view and list upcoming events and meetings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "upcoming_only": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": "Create a new event on the Calendar, and optionally prepare an email draft in Compose to inform attendees (waiting for user confirmation before sending).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "start_at": {"type": "string"},
+                    "description": {"type": "string"},
+                    "reminder_minutes": {"type": "integer"},
+                    "attendees": {"type": "string"},
+                    "inform_via_email": {"type": "boolean"},
+                },
+                "required": ["title", "start_at"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_calendar_event",
+            "description": "Edit a user-created Calendar event (title, date/time, description, reminder, attendees), and optionally prepare an email draft in Compose to inform attendees about the update (waiting for user confirmation before sending).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "integer"},
+                    "target_title": {"type": "string"},
+                    "new_title": {"type": "string"},
+                    "start_at": {"type": "string"},
+                    "description": {"type": "string"},
+                    "reminder_minutes": {"type": "integer"},
+                    "attendees": {"type": "string"},
+                    "inform_via_email": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_calendar_event",
+            "description": "Delete an event from the Calendar by id or title.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "integer"},
+                    "title": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_contact",
+            "description": "Delete a contact from the Contact Book by id, name, or email.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_id": {"type": "integer"},
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_new_chat",
+            "description": "Start a brand new Jarvis chat conversation.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "simulate_incoming_email",
+            "description": "Trigger a simulated incoming push email into Inbox (same as clicking Simulate Push Email button).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disconnect_gmail",
+            "description": "Disconnect the Gmail account and switch to Demo Mode.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trigger_ui_button",
+            "description": "Click or trigger any UI button or panel control in Jarvis Mailer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "button": {
+                        "type": "string",
+                        "enum": [
+                            "compose",
+                            "inbox",
+                            "starred",
+                            "sent",
+                            "drafts",
+                            "scheduled",
+                            "meetings",
+                            "calendar",
+                            "calendar_list_mode",
+                            "calendar_month_mode",
+                            "spam",
+                            "bin",
+                            "contacts",
+                            "connect_gmail",
+                            "sync_gmail",
+                            "disconnect_gmail",
+                            "simulate_push",
+                            "toggle_theme",
+                            "approve_detected_meeting",
+                            "dismiss_detected_meeting",
+                            "clear_filters",
+                            "clear_bin",
+                            "next_page",
+                            "prev_page",
+                            "back_to_list",
+                            "star_email",
+                            "reply",
+                            "forward",
+                            "toggle_read",
+                            "mark_spam",
+                            "move_to_bin",
+                            "restore_from_bin",
+                            "discard_compose",
+                            "toggle_cc",
+                            "toggle_bcc",
+                            "save_draft",
+                            "cancel_contact_edit",
+                            "calendar_prev_month",
+                            "calendar_next_month",
+                            "open_add_event_form",
+                            "cancel_add_event_form",
+                            "open_edit_event_form",
+                            "inform_event_users",
+                            "open_event_email",
+                            "delete_event",
+                            "new_chat",
+                        ],
+                    }
+                },
+                "required": ["button"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_user_profile",
+            "description": "Fetch and show the user's connected Gmail / account details such as display name, email, and mailbox statistics.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -293,6 +573,7 @@ def _build_context_summary(account: MailAccount, ui_context: Dict[str, Any]) -> 
     open_email_id = ui_context.get("open_email_id") or (
         ui_context.get("chat_context") or {}
     ).get("open_email_id")
+    selected_event_id = ui_context.get("selected_calendar_event_id")
     parts = [
         f"User local time: {local_now.isoformat()}",
         f"Current UI view: {current_view}",
@@ -304,6 +585,12 @@ def _build_context_summary(account: MailAccount, ui_context: Dict[str, Any]) -> 
                 f"Currently open email (id={email.id}): From {email.sender_name} <{email.sender_email}>, "
                 f"Subject: '{email.subject}', Snippet: '{email.snippet}'"
             )
+    if selected_event_id:
+        ev = CalendarEvent.objects.filter(account=account, id=selected_event_id).first()
+        if ev:
+            parts.append(
+                f"Currently selected calendar event (id={ev.id}): Title '{ev.title}', Starts: {ev.start_at.isoformat()}"
+            )
     if ui_context.get("active_filters"):
         parts.append(f"Active filters: {json.dumps(ui_context['active_filters'])}")
     compose_draft = ui_context.get("compose_draft") or {}
@@ -313,6 +600,8 @@ def _build_context_summary(account: MailAccount, ui_context: Dict[str, Any]) -> 
             + json.dumps(
                 {
                     "to": compose_draft.get("to", ""),
+                    "cc": compose_draft.get("cc", ""),
+                    "bcc": compose_draft.get("bcc", ""),
                     "subject": compose_draft.get("subject", ""),
                     "body": (compose_draft.get("body", "") or "")[:1200],
                 }
@@ -355,6 +644,8 @@ def _execute_tool(
             subject=args.get("subject", ""),
             body=args.get("body", ""),
             account=account,
+            cc=args.get("cc", ""),
+            bcc=args.get("bcc", ""),
         )
     if name == "schedule_email":
         return execute_schedule_tool(
@@ -364,6 +655,8 @@ def _execute_tool(
             body=args.get("body", ""),
             scheduled_at=args.get("scheduled_at", ""),
             client_tz=get_client_tz(ui_context),
+            cc=args.get("cc", ""),
+            bcc=args.get("bcc", ""),
         )
     if name == "search_emails":
         return execute_search_tool(
@@ -416,7 +709,17 @@ def _execute_tool(
     if name == "star_email":
         return execute_star_open_email(account, open_id, starred=args.get("starred", True))
     if name == "move_email":
-        return execute_move_open_email(account, open_id, args.get("folder", "bin"))
+        return execute_move_open_email(
+            account,
+            args.get("email_id") or open_id,
+            args.get("folder", "bin"),
+            subject=args.get("subject"),
+            sender=args.get("sender"),
+            email_address=args.get("email_address"),
+            name=args.get("name"),
+            q=args.get("q"),
+            move_all=bool(args.get("move_all")),
+        )
     if name == "save_contact":
         return execute_save_contact_tool(
             account, name=args.get("name", ""), email=args.get("email", "")
@@ -438,6 +741,8 @@ def _execute_tool(
             to=args.get("to", ""),
             subject=args.get("subject", ""),
             body=args.get("body", ""),
+            cc=args.get("cc", ""),
+            bcc=args.get("bcc", ""),
         )
     if name == "mark_read_status":
         return execute_mark_read_open_email(account, open_id, is_read=args.get("is_read", False))
@@ -452,6 +757,112 @@ def _execute_tool(
         return {"reply": "Sending your email now.", "ui_actions": [{"type": "submit_compose"}], "rich_cards": []}
     if name == "discard_compose":
         return {"reply": "Discarded compose draft.", "ui_actions": [{"type": "discard_compose"}], "rich_cards": []}
+    if name == "delete_email":
+        has_scope = any(
+            args.get(k)
+            for k in ("email_id", "folder", "subject", "sender", "recipient", "email_address", "name", "q", "delete_all")
+        )
+        target_id = args.get("email_id") if has_scope else open_id
+        return execute_delete_email_tool(
+            account,
+            email_id=target_id,
+            folder=args.get("folder"),
+            sender=args.get("sender"),
+            recipient=args.get("recipient"),
+            subject=args.get("subject"),
+            email_address=args.get("email_address"),
+            name=args.get("name"),
+            q=args.get("q"),
+            permanent=bool(args.get("permanent")),
+            delete_all=bool(args.get("delete_all")),
+        )
+    if name == "restore_email":
+        has_scope = any(
+            args.get(k)
+            for k in ("email_id", "subject", "sender", "email_address", "name", "q", "restore_all")
+        )
+        target_id = args.get("email_id") if has_scope else open_id
+        return execute_restore_email_tool(
+            account,
+            email_id=target_id,
+            subject=args.get("subject"),
+            sender=args.get("sender"),
+            email_address=args.get("email_address"),
+            name=args.get("name"),
+            q=args.get("q"),
+            restore_all=bool(args.get("restore_all")),
+        )
+    if name == "clear_bin":
+        return execute_clear_bin_tool(account)
+    if name == "edit_contact":
+        return execute_edit_contact_tool(
+            account,
+            contact_id=args.get("contact_id"),
+            target_name=args.get("target_name", ""),
+            target_email=args.get("target_email", ""),
+            new_name=args.get("new_name", ""),
+            new_email=args.get("new_email", ""),
+            new_notes=args.get("new_notes"),
+        )
+    if name == "list_calendar_events":
+        return execute_list_calendar_events_tool(
+            account,
+            upcoming_only=args.get("upcoming_only", True),
+            client_tz=get_client_tz(ui_context),
+        )
+    if name == "create_calendar_event":
+        return execute_create_calendar_event_tool(
+            account,
+            title=args.get("title", ""),
+            start_at=args.get("start_at", ""),
+            description=args.get("description", ""),
+            reminder_minutes=args.get("reminder_minutes", 15),
+            attendees=args.get("attendees", ""),
+            inform_via_email=bool(args.get("inform_via_email")),
+            client_tz=get_client_tz(ui_context),
+        )
+    if name == "edit_calendar_event":
+        return execute_edit_calendar_event_tool(
+            account,
+            event_id=args.get("event_id") or ui_context.get("selected_calendar_event_id"),
+            target_title=args.get("target_title", ""),
+            new_title=args.get("new_title", ""),
+            start_at=args.get("start_at", ""),
+            description=args.get("description"),
+            reminder_minutes=args.get("reminder_minutes"),
+            attendees=args.get("attendees"),
+            inform_via_email=bool(args.get("inform_via_email")),
+            client_tz=get_client_tz(ui_context),
+        )
+    if name == "delete_calendar_event":
+        return execute_delete_calendar_event_tool(
+            account,
+            event_id=args.get("event_id") or ui_context.get("selected_calendar_event_id"),
+            title=args.get("title", ""),
+        )
+    if name == "delete_contact":
+        return execute_delete_contact_tool(
+            account,
+            contact_id=args.get("contact_id"),
+            name=args.get("name", ""),
+            email=args.get("email", ""),
+        )
+    if name == "start_new_chat":
+        return execute_new_chat_tool(account)
+    if name == "simulate_incoming_email":
+        return execute_simulate_incoming_tool(account)
+    if name == "disconnect_gmail":
+        return execute_disconnect_gmail_tool(account)
+    if name == "trigger_ui_button":
+        return execute_trigger_ui_button_tool(
+            account,
+            args.get("button", ""),
+            open_email_id=open_id,
+            selected_event_id=ui_context.get("selected_calendar_event_id"),
+            current_view=ui_context.get("current_view", "inbox"),
+        )
+    if name == "get_user_profile":
+        return execute_user_profile_tool(account)
     return {"reply": "Done.", "ui_actions": [], "rich_cards": []}
 
 
@@ -467,7 +878,10 @@ def _run_openai_agent(
     system_prompt = (
         "You are Jarvis, an autonomous agentic AI co-pilot embedded in a mail web application. "
         "You can plan and execute multiple tool calls in sequence (e.g., search -> read_email_detail -> reply_to_open_email) "
-        "to accomplish complex user goals. Always drive the UI using tools rather than only describing actions.\n\n"
+        "to accomplish complex user goals. Always drive the UI using tools rather than only describing actions. "
+        "CRITICAL RULE: Whenever you draft, compose, reply to, forward, revise, or prepare to schedule an email, "
+        "NEVER send or schedule it immediately in the same turn. Stop after calling the drafting or scheduling tool "
+        "so the user can review the draft and explicitly confirm.\n\n"
         + _build_context_summary(account, ui_context)
     )
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -481,6 +895,7 @@ def _run_openai_agent(
     all_cards: List[Dict[str, Any]] = []
     agent_steps: List[str] = []
     last_tool_reply = ""
+    drafted_in_turn = False
 
     for _ in range(6):
         resp = client.chat.completions.create(
@@ -500,9 +915,31 @@ def _run_openai_agent(
             }
 
         messages.append(choice.model_dump(exclude_none=True))
+        batch_has_draft = any(
+            tc.function.name in DRAFTING_TOOLS
+            or tc.function.name in ("create_calendar_event", "edit_calendar_event")
+            for tc in choice.tool_calls
+        )
         for tc in choice.tool_calls:
+            if tc.function.name == "submit_compose" and (
+                batch_has_draft
+                or drafted_in_turn
+                or not re.search(r"\b(?:send\s+it|send\s+now|confirm|yes)\b", message, re.IGNORECASE)
+            ):
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps({"skipped": "Waiting for explicit user confirmation before sending."}),
+                    }
+                )
+                continue
             args = json.loads(tc.function.arguments or "{}")
             result = _execute_tool(account, tc.function.name, args, ctx)
+            if tc.function.name in DRAFTING_TOOLS or any(
+                a.get("type") == "fill_compose" for a in result.get("ui_actions", [])
+            ):
+                drafted_in_turn = True
             agent_steps.append(tc.function.name.replace("_", " ").title())
             all_actions.extend(result.get("ui_actions", []))
             all_cards.extend(result.get("rich_cards", []))
@@ -520,6 +957,13 @@ def _run_openai_agent(
                     "content": json.dumps(obs, default=str)[:4000],
                 }
             )
+        if drafted_in_turn:
+            return {
+                "reply": last_tool_reply or "Please review the draft and confirm before sending or scheduling.",
+                "ui_actions": all_actions,
+                "rich_cards": all_cards,
+                "agent_steps": agent_steps,
+            }
 
     return {
         "reply": last_tool_reply or "Completed multi-step workflow.",
@@ -551,7 +995,10 @@ def _run_gemini_agent(
         "You are Jarvis, an autonomous agentic AI co-pilot embedded in a mail web application. "
         "Convert any natural language user request into the appropriate tool calls in sequence to control the UI, "
         "manage contacts, compose/draft/schedule/reply/forward/star/move/summarize emails. "
-        "When drafting or scheduling an email from user intent, write a natural subject and body.\n\n"
+        "When drafting or scheduling an email from user intent, write a natural subject and body. "
+        "CRITICAL RULE: Whenever you draft, compose, reply to, forward, revise, or prepare to schedule an email, "
+        "NEVER send or schedule it immediately in the same turn. Stop after calling the drafting or scheduling tool "
+        "so the user can review the draft and explicitly confirm.\n\n"
         + _build_context_summary(account, ui_context)
     )
 
@@ -567,6 +1014,7 @@ def _run_gemini_agent(
     all_cards: List[Dict[str, Any]] = []
     agent_steps: List[str] = []
     last_tool_reply = ""
+    drafted_in_turn = False
 
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
@@ -591,9 +1039,30 @@ def _run_gemini_agent(
 
         contents.append(resp.candidates[0].content)
         fn_response_parts = []
+        batch_has_draft = any(
+            fc.name in DRAFTING_TOOLS
+            or fc.name in ("create_calendar_event", "edit_calendar_event")
+            for fc in fn_calls
+        )
         for fc in fn_calls:
+            if fc.name == "submit_compose" and (
+                batch_has_draft
+                or drafted_in_turn
+                or not re.search(r"\b(?:send\s+it|send\s+now|confirm|yes)\b", message, re.IGNORECASE)
+            ):
+                fn_response_parts.append(
+                    types.Part.from_function_response(
+                        name=fc.name,
+                        response={"result": {"skipped": "Waiting for explicit user confirmation before sending."}},
+                    )
+                )
+                continue
             args = dict(fc.args or {})
             result = _execute_tool(account, fc.name, args, ctx)
+            if fc.name in DRAFTING_TOOLS or any(
+                a.get("type") == "fill_compose" for a in result.get("ui_actions", [])
+            ):
+                drafted_in_turn = True
             agent_steps.append(fc.name.replace("_", " ").title())
             all_actions.extend(result.get("ui_actions", []))
             all_cards.extend(result.get("rich_cards", []))
@@ -608,6 +1077,13 @@ def _run_gemini_agent(
                 types.Part.from_function_response(name=fc.name, response={"result": obs})
             )
         contents.append(types.Content(role="user", parts=fn_response_parts))
+        if drafted_in_turn:
+            return {
+                "reply": last_tool_reply or "Please review the draft and confirm before sending or scheduling.",
+                "ui_actions": all_actions,
+                "rich_cards": all_cards,
+                "agent_steps": agent_steps,
+            }
 
     return {
         "reply": last_tool_reply or "Completed multi-step workflow.",
@@ -644,7 +1120,7 @@ def process_assistant_command(
         r"\b(?:edit|rewrite|revise|rephrase|romanticize|romanticise|reword)\b|\bmake\s+(?:it|this)\b",
         message,
         re.IGNORECASE,
-    ):
+    ) and not re.search(r"\b(?:contact|event|meeting)\b", message, re.IGNORECASE):
         return run_fallback_nlu(account, message, ui_context, history=history or [])
     provider = settings.AI_PROVIDER
     api_key = settings.OPENAI_API_KEY if provider == "openai" else settings.GEMINI_API_KEY

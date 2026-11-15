@@ -58,6 +58,7 @@ def gmail_pubsub_webhook(request):
     return JsonResponse({"status": "ok", "added": added})
 
 
+@csrf_exempt
 @require_POST
 def simulate_incoming_email(request):
     """Simulate an incoming push email in Demo Mode and broadcast via SSE."""

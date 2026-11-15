@@ -4,7 +4,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="csrf-token" content="{{ csrf_token }}" />
   <title>Jarvis Mailer — AI-Controlled Mail Client</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="{% static 'css/app.css' %}" />
 </head>
 <body>
@@ -12,7 +16,25 @@
     <!-- Left Navigation Rail -->
     <aside class="nav-rail">
       <div class="brand">
-        <div class="brand-icon">J</div>
+        <div class="arc-reactor-logo" aria-hidden="true">
+          <div class="reactor-container">
+            <div class="reactor-container-inner circle abs-center"></div>
+            <div class="tunnel circle abs-center"></div>
+            <div class="core-wrapper circle abs-center"></div>
+            <div class="core-outer circle abs-center"></div>
+            <div class="core-inner circle abs-center"></div>
+            <div class="coil-container">
+              <div class="coil coil-1"></div>
+              <div class="coil coil-2"></div>
+              <div class="coil coil-3"></div>
+              <div class="coil coil-4"></div>
+              <div class="coil coil-5"></div>
+              <div class="coil coil-6"></div>
+              <div class="coil coil-7"></div>
+              <div class="coil coil-8"></div>
+            </div>
+          </div>
+        </div>
         <div>
           <div class="brand-name">Jarvis Mailer</div>
           <div class="brand-sub">AI-Driven Inbox</div>
@@ -57,8 +79,15 @@
 
       <div class="nav-footer">
         <div id="account-card" class="account-card">
-          <div id="account-email" class="account-email">Loading...</div>
+          <div class="account-profile-row">
+            <div id="account-avatar" class="account-avatar hidden" aria-hidden="true"></div>
+            <div class="account-profile-text">
+              <div id="account-name" class="account-name"></div>
+              <div id="account-email" class="account-email">Loading...</div>
+            </div>
+          </div>
           <div id="account-provider" class="account-provider">Demo Mode</div>
+          <div id="account-meta" class="account-meta"></div>
           <div class="account-actions">
             <a id="btn-connect-gmail" href="/auth/google/login/" class="btn btn-sm btn-outline hidden">Connect Gmail</a>
             <button id="btn-sync-gmail" class="btn btn-sm btn-primary hidden">↻ Sync</button>
@@ -103,7 +132,10 @@
       <section id="view-list" class="workspace-view active">
         <div class="view-header">
           <h2 id="list-title">Inbox</h2>
-          <span id="list-count" class="muted">0 emails</span>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <button id="btn-clear-bin" class="btn btn-sm btn-outline hidden" type="button">Clear Bin</button>
+            <span id="list-count" class="muted">0 emails</span>
+          </div>
         </div>
         <div id="email-list" class="email-list"></div>
         <div class="pagination-controls">
@@ -123,6 +155,7 @@
             <button id="btn-forward" class="btn btn-sm btn-outline">Forward</button>
             <button id="btn-toggle-read" class="btn btn-sm btn-ghost">Mark Unread</button>
             <button id="btn-spam" class="btn btn-sm btn-ghost">Spam</button>
+            <button id="btn-restore-bin" class="btn btn-sm btn-outline hidden" type="button">↩ Restore</button>
             <button id="btn-bin" class="btn btn-sm btn-ghost">Bin</button>
           </div>
         </div>
@@ -130,28 +163,61 @@
         <div id="thread-container" class="thread-container"></div>
       </section>
 
-      <!-- Compose View -->
+      <!-- Compose View (Gmail Style) -->
       <section id="view-compose" class="workspace-view">
         <div class="view-header">
           <h2 id="compose-title">New Message</h2>
           <button id="btn-discard-compose" class="btn btn-sm btn-ghost">Discard</button>
         </div>
-        <p class="muted" style="margin:0 0 10px;">Review and edit any field before sending. You can also ask Jarvis to rewrite the draft.</p>
-        <form id="compose-form" class="compose-form">
-          <label class="field">
-            <span>To</span>
-            <input id="compose-to" type="email" class="input" placeholder="recipient@example.com" required />
-          </label>
-          <label class="field">
-            <span>Subject</span>
-            <input id="compose-subject" type="text" class="input" placeholder="Subject" required />
-          </label>
-          <label class="field">
-            <span>Message</span>
-            <textarea id="compose-body" class="textarea" rows="12" placeholder="Write your message..."></textarea>
-          </label>
-          <div class="compose-footer" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
-            <button type="submit" id="btn-send-email" class="btn btn-primary">Send Email</button>
+        <p class="muted" style="margin:0 0 10px;">Add multiple recipients in To, Cc, or Bcc (press Enter, comma, or pick a contact). Review before sending.</p>
+        <form id="compose-form" class="compose-form gmail-compose-card" novalidate>
+          {% csrf_token %}
+          <div class="gmail-compose-recipients" id="gmail-compose-recipients">
+            <div class="gmail-recipient-row" id="compose-to-row" data-field="to">
+              <span class="gmail-recipient-label">To</span>
+              <div class="gmail-chip-box" id="compose-to-box">
+                <div class="gmail-chips" id="compose-to-chips"></div>
+                <input id="compose-to-entry" type="text" class="gmail-chip-input" placeholder="Recipients" autocomplete="off" />
+                <input id="compose-to" type="hidden" value="" />
+              </div>
+              <div class="gmail-cc-bcc-toggles">
+                <button type="button" id="btn-toggle-cc" class="gmail-cc-btn" title="Add Cc recipients">Cc</button>
+                <button type="button" id="btn-toggle-bcc" class="gmail-cc-btn" title="Add Bcc recipients">Bcc</button>
+              </div>
+              <div class="gmail-autocomplete hidden" id="compose-to-suggest"></div>
+            </div>
+
+            <div class="gmail-recipient-row hidden" id="compose-cc-row" data-field="cc">
+              <span class="gmail-recipient-label">Cc</span>
+              <div class="gmail-chip-box" id="compose-cc-box">
+                <div class="gmail-chips" id="compose-cc-chips"></div>
+                <input id="compose-cc-entry" type="text" class="gmail-chip-input" placeholder="Cc recipients" autocomplete="off" />
+                <input id="compose-cc" type="hidden" value="" />
+              </div>
+              <div class="gmail-autocomplete hidden" id="compose-cc-suggest"></div>
+            </div>
+
+            <div class="gmail-recipient-row hidden" id="compose-bcc-row" data-field="bcc">
+              <span class="gmail-recipient-label">Bcc</span>
+              <div class="gmail-chip-box" id="compose-bcc-box">
+                <div class="gmail-chips" id="compose-bcc-chips"></div>
+                <input id="compose-bcc-entry" type="text" class="gmail-chip-input" placeholder="Bcc recipients" autocomplete="off" />
+                <input id="compose-bcc" type="hidden" value="" />
+              </div>
+              <div class="gmail-autocomplete hidden" id="compose-bcc-suggest"></div>
+            </div>
+
+            <div class="gmail-subject-row">
+              <input id="compose-subject" type="text" class="gmail-subject-input" placeholder="Subject" required />
+            </div>
+          </div>
+
+          <div class="gmail-body-wrap">
+            <textarea id="compose-body" class="gmail-body-textarea" rows="12" placeholder="Write your message..."></textarea>
+          </div>
+
+          <div class="compose-footer gmail-compose-footer">
+            <button type="submit" id="btn-send-email" class="btn btn-primary gmail-send-btn">Send</button>
             <button type="button" id="btn-save-draft" class="btn btn-outline">Save Draft</button>
             <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
               <input id="compose-schedule-at" type="datetime-local" class="input" style="width:auto;" />
@@ -168,9 +234,13 @@
           <span class="muted">Jarvis uses these names when you say "send mail to &lt;name&gt;"</span>
         </div>
         <form id="contact-add-form" class="filter-bar" style="border-radius:10px;border:1px solid var(--border);margin-bottom:14px;">
+          {% csrf_token %}
+          <input id="contact-edit-id" type="hidden" value="" />
           <input id="contact-name" type="text" class="input" placeholder="Full Name (e.g. Sarah Chen)" required />
           <input id="contact-email" type="email" class="input" placeholder="Email (e.g. sarah@example.com)" required />
-          <button type="submit" class="btn btn-primary">Save Contact</button>
+          <input id="contact-notes" type="text" class="input" placeholder="Notes (optional)" />
+          <button id="contact-submit-btn" type="submit" class="btn btn-primary">Save Contact</button>
+          <button id="contact-cancel-edit" type="button" class="btn btn-ghost hidden">Cancel</button>
         </form>
         <div id="contacts-list" class="email-list"></div>
       </section>
@@ -193,10 +263,15 @@
           <button id="calendar-add-event" class="btn btn-sm btn-primary" type="button">+ Add event</button>
         </div>
         <form id="calendar-add-form" class="calendar-add-form hidden">
+          {% csrf_token %}
+          <input id="calendar-event-edit-id" type="hidden" value="" />
           <label class="field"><span>Event</span><input id="calendar-event-title" class="input" required maxlength="500" placeholder="Meeting title" /></label>
           <label class="field"><span>Date and time</span><input id="calendar-event-start" class="input" type="datetime-local" required /></label>
           <label class="field"><span>Reminder</span><select id="calendar-event-reminder" class="select"><option value="0">At event time</option><option value="5">5 minutes before</option><option value="15" selected>15 minutes before</option><option value="30">30 minutes before</option><option value="60">1 hour before</option></select></label>
-          <button class="btn btn-primary" type="submit">Review &amp; save</button><button id="calendar-cancel-add" class="btn btn-outline" type="button">Cancel</button>
+          <label class="field"><span>Description</span><input id="calendar-event-description" class="input" maxlength="1000" placeholder="Optional details or agenda" /></label>
+          <label class="field"><span>Notify attendees</span><input id="calendar-event-attendees" class="input" placeholder="Names or emails, comma-separated" /></label>
+          <label class="calendar-inform-option"><input id="calendar-event-inform" type="checkbox" /><span id="calendar-event-inform-label">Inform users by drafting an email with Jarvis</span></label>
+          <button id="calendar-submit-btn" class="btn btn-primary" type="submit">Review &amp; save</button><button id="calendar-cancel-add" class="btn btn-outline" type="button">Cancel</button>
         </form>
         <div class="calendar-layout">
           <div id="calendar-events-list" class="calendar-events-list"></div>
@@ -215,11 +290,32 @@
     <!-- Right AI Assistant Panel -->
     <aside class="assistant-panel">
       <div class="assistant-header">
-        <div class="assistant-header-main">
-          <div class="assistant-title">Jarvis Co-Pilot</div>
-          <div id="assistant-context-pill" class="context-pill">Context: Inbox</div>
+        <div class="assistant-header-brand">
+          <div class="arc-reactor-logo arc-reactor-sm" aria-hidden="true">
+            <div class="reactor-container">
+              <div class="reactor-container-inner circle abs-center"></div>
+              <div class="tunnel circle abs-center"></div>
+              <div class="core-wrapper circle abs-center"></div>
+              <div class="core-outer circle abs-center"></div>
+              <div class="core-inner circle abs-center"></div>
+              <div class="coil-container">
+                <div class="coil coil-1"></div>
+                <div class="coil coil-2"></div>
+                <div class="coil coil-3"></div>
+                <div class="coil coil-4"></div>
+                <div class="coil coil-5"></div>
+                <div class="coil coil-6"></div>
+                <div class="coil coil-7"></div>
+                <div class="coil coil-8"></div>
+              </div>
+            </div>
+          </div>
+          <div class="assistant-header-main">
+            <div class="assistant-title">Jarvis Co-Pilot</div>
+            <div id="assistant-context-pill" class="context-pill">Context: Inbox</div>
+          </div>
         </div>
-        <button id="btn-new-chat" class="btn btn-sm btn-outline">New chat</button>
+        <button id="btn-new-chat" class="btn btn-sm btn-outline" title="Start a new chat (Alt+N)">New chat (Alt+N)</button>
       </div>
 
       <div class="assistant-history-wrap">
@@ -243,10 +339,61 @@
       </div>
 
       <form id="assistant-form" class="assistant-input-bar">
-        <input id="assistant-input" type="text" class="input" placeholder="Ask Jarvis to control the UI..." autocomplete="off" />
+        {% csrf_token %}
+        <input id="assistant-input" type="text" class="input" placeholder="Ask Jarvis to control the UI... (Ctrl+Space)" autocomplete="off" />
         <button type="submit" class="btn btn-primary">Run</button>
       </form>
     </aside>
+  </div>
+
+  <!-- Centered Jarvis Spotlight (Ctrl+Space) -->
+  <div id="jarvis-spotlight-overlay" class="jarvis-spotlight-overlay hidden" role="dialog" aria-modal="true" aria-label="Ask Jarvis">
+    <div class="jarvis-spotlight-modal">
+      <form id="jarvis-spotlight-form" class="jarvis-spotlight-bar">
+        {% csrf_token %}
+        <span class="jarvis-spotlight-icon" aria-hidden="true">
+          <div class="arc-reactor-logo arc-reactor-sm">
+            <div class="reactor-container">
+              <div class="reactor-container-inner circle abs-center"></div>
+              <div class="tunnel circle abs-center"></div>
+              <div class="core-wrapper circle abs-center"></div>
+              <div class="core-outer circle abs-center"></div>
+              <div class="core-inner circle abs-center"></div>
+              <div class="coil-container">
+                <div class="coil coil-1"></div>
+                <div class="coil coil-2"></div>
+                <div class="coil coil-3"></div>
+                <div class="coil coil-4"></div>
+                <div class="coil coil-5"></div>
+                <div class="coil coil-6"></div>
+                <div class="coil coil-7"></div>
+                <div class="coil coil-8"></div>
+              </div>
+            </div>
+          </div>
+        </span>
+        <input
+          id="jarvis-spotlight-input"
+          type="text"
+          class="jarvis-spotlight-input"
+          placeholder="Ask Jarvis anything or tell it what to do..."
+          autocomplete="off"
+        />
+        <div class="jarvis-spotlight-actions">
+          <kbd class="jarvis-kbd">Esc</kbd>
+          <button type="submit" class="jarvis-spotlight-submit" aria-label="Send to Jarvis" title="Send to Jarvis">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+              <polyline points="12 5 19 12 12 19"></polyline>
+            </svg>
+          </button>
+        </div>
+      </form>
+      <div class="jarvis-spotlight-footer">
+        <span id="jarvis-spotlight-context" class="context-pill">Context: Inbox</span>
+        <span class="jarvis-spotlight-hint">Press <kbd class="jarvis-kbd">Enter</kbd> to run · <kbd class="jarvis-kbd">Ctrl + Space</kbd> to toggle</span>
+      </div>
+    </div>
   </div>
 
   <div id="toast-container" class="toast-container"></div>

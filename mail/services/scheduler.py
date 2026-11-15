@@ -29,9 +29,13 @@ def dispatch_due_scheduled_emails(account: MailAccount) -> int:
                 body=item.body_text,
                 thread_id=item.thread_id if not item.thread_id.startswith("thread-") else None,
                 in_reply_to=item.in_reply_to or None,
+                cc=item.cc_email or "",
+                bcc=item.bcc_email or "",
             )
-            for addr in item.recipient_email.split(","):
-                upsert_contact(account, "", addr.strip())
+            for field_val in (item.recipient_email, item.cc_email, item.bcc_email):
+                for addr in (field_val or "").split(","):
+                    if addr.strip():
+                        upsert_contact(account, "", addr.strip())
             item.delete()
             sent_count += 1
         except Exception:

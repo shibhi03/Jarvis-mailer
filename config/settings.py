@@ -20,9 +20,20 @@ DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() in ("1", "true", "yes")
 
 ALLOWED_HOSTS = [
     h.strip()
-    for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(",")
     if h.strip()
 ]
+
+CSRF_TRUSTED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "DJANGO_CSRF_TRUSTED_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000,https://localhost:8000,https://127.0.0.1:8000",
+    ).split(",")
+    if o.strip()
+]
+CSRF_COOKIE_HTTPONLY = False
+CSRF_COOKIE_SAMESITE = "Lax"
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -118,6 +129,7 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
     "openid",
 ]
 

@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 
 from django.conf import settings
 from django.utils import timezone
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -46,28 +47,41 @@ def _extract_bodies(payload: dict) -> Tuple[str, str]:
 class GmailMailProvider(BaseMailProvider):
     """Google Gmail API integration with OAuth2 & Pub/Sub incremental sync."""
 
+    def _refresh_credentials(self, creds: Credentials) -> None:
+        try:
+            creds.refresh(Request())
+        except RefreshError:
+            if getattr(creds, "_scopes", None) is not None or getattr(creds, "_default_scopes", None) is not None:
+                creds._scopes = None
+                creds._default_scopes = None
+                creds.refresh(Request())
+            else:
+                raise
+        self.account.access_token = creds.token or ""
+        new_expiry = creds.expiry
+        if new_expiry is not None and new_expiry.tzinfo is None:
+            new_expiry = new_expiry.replace(tzinfo=dt_timezone.utc)
+        self.account.token_expiry = new_expiry
+        self.account.save(update_fields=["access_token", "token_expiry", "updated_at"])
+
     def _get_credentials(self) -> Credentials:
         expiry = self.account.token_expiry
         if expiry is not None and expiry.tzinfo is not None:
             expiry = expiry.astimezone(dt_timezone.utc).replace(tzinfo=None)
 
+        # Do not force settings.GMAIL_SCOPES during refresh: existing refresh tokens may
+        # predate newly added scopes (e.g. userinfo.profile), which triggers invalid_scope.
         creds = Credentials(
             token=self.account.access_token or None,
             refresh_token=self.account.refresh_token or None,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=settings.GOOGLE_CLIENT_ID,
             client_secret=settings.GOOGLE_CLIENT_SECRET,
-            scopes=settings.GMAIL_SCOPES,
+            scopes=None,
             expiry=expiry,
         )
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            self.account.access_token = creds.token or ""
-            new_expiry = creds.expiry
-            if new_expiry is not None and new_expiry.tzinfo is None:
-                new_expiry = new_expiry.replace(tzinfo=dt_timezone.utc)
-            self.account.token_expiry = new_expiry
-            self.account.save(update_fields=["access_token", "token_expiry", "updated_at"])
+        if (creds.expired or not creds.token) and creds.refresh_token:
+            self._refresh_credentials(creds)
         return creds
 
     def _service(self):
@@ -80,6 +94,8 @@ class GmailMailProvider(BaseMailProvider):
 
         sender_name, sender_email = parseaddr(headers.get("from", ""))
         recipient = headers.get("to", self.account.email)
+        cc = headers.get("cc", "")
+        bcc = headers.get("bcc", "")
         subject = headers.get("subject", "(No subject)")
         in_reply_to = headers.get("in-reply-to", "")
 
@@ -113,6 +129,8 @@ class GmailMailProvider(BaseMailProvider):
                 "sender_name": sender_name or sender_email,
                 "sender_email": sender_email or self.account.email,
                 "recipient_email": recipient,
+                "cc_email": cc,
+                "bcc_email": bcc,
                 "subject": subject[:500],
                 "snippet": snippet,
                 "body_text": body_text or snippet,
@@ -151,7 +169,84 @@ class GmailMailProvider(BaseMailProvider):
         if profile.get("historyId"):
             self.account.history_id = str(profile["historyId"])
             self.account.save(update_fields=["history_id", "updated_at"])
+        try:
+            self.fetch_user_profile()
+        except Exception:
+            pass
         return added
+
+    def fetch_user_profile(self) -> dict:
+        """Fetch user profile metadata from Google OAuth2 userinfo and Gmail API."""
+        creds = self._get_credentials()
+        user_info = {}
+        try:
+            oauth2_service = build("oauth2", "v2", credentials=creds, cache_discovery=False)
+            user_info = oauth2_service.userinfo().get().execute() or {}
+        except Exception:
+            user_info = {}
+
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        gmail_profile = {}
+        try:
+            gmail_profile = service.users().getProfile(userId="me").execute() or {}
+        except Exception:
+            gmail_profile = {}
+
+        send_as_name = ""
+        try:
+            send_as_resp = service.users().settings().sendAs().list(userId="me").execute() or {}
+            entries = send_as_resp.get("sendAs", []) or []
+            preferred = next(
+                (
+                    entry
+                    for entry in entries
+                    if entry.get("isDefault")
+                    or entry.get("isPrimary")
+                    or (entry.get("sendAsEmail") or "").lower() == self.account.email.lower()
+                ),
+                entries[0] if entries else None,
+            )
+            if preferred:
+                send_as_name = (preferred.get("displayName") or "").strip()
+        except Exception:
+            send_as_name = ""
+
+        candidate_name = (user_info.get("name") or "").strip()
+        if not candidate_name or candidate_name.lower() == self.account.email.lower():
+            candidate_name = send_as_name or candidate_name
+        if not candidate_name or candidate_name.lower() == self.account.email.lower():
+            sent_name = (
+                EmailMessage.objects.filter(
+                    account=self.account,
+                    folder=EmailMessage.FOLDER_SENT,
+                    sender_email__iexact=self.account.email,
+                )
+                .exclude(sender_name="")
+                .exclude(sender_name__iexact=self.account.email)
+                .values_list("sender_name", flat=True)
+                .first()
+            )
+            if sent_name:
+                candidate_name = sent_name.strip()
+
+        if (
+            candidate_name
+            and candidate_name.lower() != self.account.email.lower()
+            and candidate_name != self.account.display_name
+        ):
+            self.account.display_name = candidate_name
+            self.account.save(update_fields=["display_name", "updated_at"])
+
+        return {
+            "email": user_info.get("email") or gmail_profile.get("emailAddress") or self.account.email,
+            "display_name": self.account.display_name or candidate_name or self.account.email,
+            "given_name": user_info.get("given_name", ""),
+            "family_name": user_info.get("family_name", ""),
+            "picture": user_info.get("picture", ""),
+            "verified_email": bool(user_info.get("verified_email", False)),
+            "messages_total": gmail_profile.get("messagesTotal"),
+            "threads_total": gmail_profile.get("threadsTotal"),
+        }
 
     def sync_history(self, new_history_id: str) -> int:
         """Incremental sync triggered by Google Cloud Pub/Sub push notification."""
@@ -197,10 +292,16 @@ class GmailMailProvider(BaseMailProvider):
         body: str,
         thread_id: Optional[str] = None,
         in_reply_to: Optional[str] = None,
+        cc: str = "",
+        bcc: str = "",
     ) -> EmailMessage:
         service = self._service()
         mime_msg = MIMEText(body)
         mime_msg["to"] = to.strip()
+        if cc and cc.strip():
+            mime_msg["cc"] = cc.strip()
+        if bcc and bcc.strip():
+            mime_msg["bcc"] = bcc.strip()
         mime_msg["subject"] = subject.strip() or "(No subject)"
         if in_reply_to:
             mime_msg["In-Reply-To"] = in_reply_to
@@ -215,6 +316,9 @@ class GmailMailProvider(BaseMailProvider):
         sent_obj, _ = self._upsert_gmail_message(
             service, result["id"], EmailMessage.FOLDER_SENT
         )
+        if bcc and bcc.strip() and not sent_obj.bcc_email:
+            sent_obj.bcc_email = bcc.strip()
+            sent_obj.save(update_fields=["bcc_email"])
         return sent_obj
 
     def mark_read(self, email: EmailMessage, is_read: bool = True) -> None:

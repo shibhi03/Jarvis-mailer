@@ -3,11 +3,13 @@ import os
 from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import redirect
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 from accounts.models import MailAccount
+from mail.models import EmailMessage
 from mail.services.gmail_provider import GmailMailProvider
 from mail.services.provider import get_active_account
 
@@ -89,6 +91,7 @@ def google_callback(request):
     provider = GmailMailProvider(account)
     try:
         provider.sync_messages(max_results=20)
+        provider.fetch_user_profile()
         if settings.GMAIL_PUBSUB_TOPIC:
             provider.start_watch(settings.GMAIL_PUBSUB_TOPIC)
     except Exception:
@@ -97,6 +100,7 @@ def google_callback(request):
     return redirect("/")
 
 
+@csrf_exempt
 @require_POST
 def disconnect_gmail(request):
     MailAccount.objects.filter(provider=MailAccount.PROVIDER_GMAIL).update(is_active=False)
@@ -106,10 +110,47 @@ def disconnect_gmail(request):
 @require_GET
 def auth_status(request):
     account = get_active_account()
+    unread_count = EmailMessage.objects.filter(
+        account=account, folder=EmailMessage.FOLDER_INBOX, is_read=False
+    ).count()
+    messages_count = EmailMessage.objects.filter(account=account).count()
+    contacts_count = account.contacts.count()
+
+    profile_details = {}
+    if account.provider == MailAccount.PROVIDER_GMAIL:
+        try:
+            profile_details = GmailMailProvider(account).fetch_user_profile()
+            account.refresh_from_db()
+        except Exception:
+            profile_details = {}
+        if not account.display_name or account.display_name.lower() == account.email.lower():
+            sent_name = (
+                EmailMessage.objects.filter(
+                    account=account,
+                    folder=EmailMessage.FOLDER_SENT,
+                    sender_email__iexact=account.email,
+                )
+                .exclude(sender_name="")
+                .exclude(sender_name__iexact=account.email)
+                .values_list("sender_name", flat=True)
+                .first()
+            )
+            if sent_name:
+                account.display_name = sent_name.strip()
+                account.save(update_fields=["display_name", "updated_at"])
+
     return JsonResponse(
         {
             "email": account.email,
-            "display_name": account.display_name,
+            "display_name": profile_details.get("display_name") or account.display_name or account.email,
+            "given_name": profile_details.get("given_name", ""),
+            "family_name": profile_details.get("family_name", ""),
+            "picture": profile_details.get("picture", ""),
+            "verified_email": profile_details.get("verified_email", False),
+            "messages_total": profile_details.get("messages_total", messages_count),
+            "threads_total": profile_details.get("threads_total"),
+            "unread_count": unread_count,
+            "contacts_count": contacts_count,
             "provider": account.provider,
             "oauth_configured": bool(
                 settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET

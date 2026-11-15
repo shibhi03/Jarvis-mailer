@@ -1,5 +1,6 @@
 import re
-from typing import List, Optional, Tuple
+from email.utils import parseaddr
+from typing import Any, List, Optional, Tuple
 
 from django.db.models import Q
 
@@ -93,3 +94,75 @@ def resolve_recipient(
         return msg.sender_email, c, ([c] if c else [])
 
     return None, None, []
+
+
+def resolve_recipient_list(
+    account: MailAccount, raw_recipients: Any
+) -> Tuple[str, List[str], List[Contact]]:
+    """Parse and resolve one or more recipient names/emails (comma, semicolon, or 'and' separated)."""
+    if not raw_recipients:
+        return "", [], []
+
+    if isinstance(raw_recipients, (list, tuple)):
+        items = [str(item).strip() for item in raw_recipients if str(item).strip()]
+    else:
+        items = [str(raw_recipients).strip()] if str(raw_recipients).strip() else []
+
+    tokens: List[str] = []
+    for item in items:
+        for chunk in re.split(r"\s*[,;]\s*", item):
+            part = chunk.strip()
+            if not part:
+                continue
+            if "<" not in part and re.search(r"\s+\band\b\s+", part, re.IGNORECASE):
+                exact = Contact.objects.filter(account=account, name__iexact=part).first()
+                if exact:
+                    tokens.append(part)
+                else:
+                    for sub in re.split(r"\s+\band\b\s+", part, flags=re.IGNORECASE):
+                        if sub.strip():
+                            tokens.append(sub.strip())
+            else:
+                tokens.append(part)
+
+    resolved_emails: List[str] = []
+    seen: set = set()
+    unresolved: List[str] = []
+    resolved_contacts: List[Contact] = []
+
+    for token in tokens:
+        if "<" in token and ">" in token:
+            _, parsed_email = parseaddr(token)
+            if parsed_email and "@" in parsed_email:
+                key = parsed_email.strip().lower()
+                if key not in seen:
+                    seen.add(key)
+                    resolved_emails.append(parsed_email.strip())
+                contact = Contact.objects.filter(account=account, email__iexact=key).first()
+                if contact and contact not in resolved_contacts:
+                    resolved_contacts.append(contact)
+                continue
+
+        if "@" in token and " " not in token:
+            clean = token.strip()
+            key = clean.lower()
+            if key not in seen:
+                seen.add(key)
+                resolved_emails.append(clean)
+            contact = Contact.objects.filter(account=account, email__iexact=key).first()
+            if contact and contact not in resolved_contacts:
+                resolved_contacts.append(contact)
+            continue
+
+        email_addr, contact, _ = resolve_recipient(account, token)
+        if email_addr:
+            key = email_addr.strip().lower()
+            if key not in seen:
+                seen.add(key)
+                resolved_emails.append(email_addr.strip())
+            if contact and contact not in resolved_contacts:
+                resolved_contacts.append(contact)
+        else:
+            unresolved.append(token)
+
+    return ", ".join(resolved_emails), unresolved, resolved_contacts

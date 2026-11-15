@@ -18,7 +18,7 @@ An AI-driven email web application built with **Django** where an embedded **Jar
   - **Google Gmail API + Cloud Pub/Sub** webhook (`/api/webhooks/gmail/`) for incremental `historyId` sync.
   - **Server-Sent Events (SSE)** stream (`/api/mail/stream/`) pushes incoming emails to the browser without manual refresh.
   - Built-in **⚡ Simulate Push Email** button in Demo Mode to test real-time SSE delivery locally without a public tunnel.
-- **Dark Mode & Polished Three-Pane UI**: Light/Dark theme persisted in `localStorage`.
+- **Dark Mode & Polished Three-Pane UI**: Light/Dark theme.
 
 ---
 
