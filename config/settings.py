@@ -7,6 +7,7 @@ from pathlib import Path
 
 import dj_database_url
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -16,7 +17,9 @@ SECRET_KEY = os.getenv(
     "django-insecure-dev-only-change-in-production-jarvis-mailer",
 )
 
-DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() in ("1", "true", "yes")
+IS_VERCEL = os.getenv("VERCEL", "").lower() in ("1", "true", "yes")
+DEBUG_DEFAULT = "False" if IS_VERCEL else "True"
+DEBUG = os.getenv("DJANGO_DEBUG", DEBUG_DEFAULT).lower() in ("1", "true", "yes")
 
 ALLOWED_HOSTS = [
     h.strip()
@@ -83,8 +86,17 @@ ASGI_APPLICATION = "config.asgi.application"
 DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL:
     DATABASES = {
-        "default": dj_database_url.parse(DATABASE_URL, conn_max_age=600),
+        # Serverless instances are short lived; persistent Django connections
+        # can outlive the Supabase connection or exhaust the pool.
+        "default": dj_database_url.parse(
+            DATABASE_URL, conn_max_age=0 if IS_VERCEL else 600
+        ),
     }
+elif IS_VERCEL:
+    raise ImproperlyConfigured(
+        "DATABASE_URL is required on Vercel. Add the Supabase PostgreSQL "
+        "connection string to the Vercel project's environment variables."
+    )
 else:
     DATABASES = {
         "default": {

@@ -50,6 +50,12 @@ python manage.py runserver
 
 Open **http://127.0.0.1:8000/** in your browser. It runs immediately in **Demo Mode** with realistic seeded threads and full AI UI control.
 
+### Deploy on Vercel with Supabase PostgreSQL
+
+The app must use PostgreSQL on Vercel because serverless instances cannot rely on a local SQLite file. In the Vercel project, add `DATABASE_URL` under **Settings → Environment Variables** for every environment you deploy (Production, Preview, and/or Development). Copy the PostgreSQL connection string from Supabase's **Connect** panel and ensure it includes `sslmode=require`. Keep the password URL-encoded if it contains reserved characters. Use the Supabase connection option that matches your network; the session pooler is suitable when direct connections are unavailable.
+
+After saving the variable, redeploy so the serverless functions receive it. Apply Django migrations to that same database before using the app (`python manage.py migrate` with `DATABASE_URL` set to the Supabase URL). Vercel deployments without `DATABASE_URL` now fail at startup with a configuration error instead of silently selecting SQLite.
+
 ### 3. Optional: Connect Real Gmail (OAuth2 + Pub/Sub) & LLM
 Edit `.env` to enable live Gmail and choose one AI provider:
 
