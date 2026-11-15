@@ -35,6 +35,17 @@ CSRF_TRUSTED_ORIGINS = [
     ).split(",")
     if o.strip()
 ]
+
+# When running in Vercel, automatically allow Vercel domains and CSRF origins
+if IS_VERCEL:
+    for host in [".vercel.app", "localhost", "127.0.0.1"]:
+        if host not in ALLOWED_HOSTS and "*" not in ALLOWED_HOSTS:
+            ALLOWED_HOSTS.append(host)
+    vercel_url = os.getenv("VERCEL_URL")
+    if vercel_url and vercel_url not in ALLOWED_HOSTS and "*" not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(vercel_url)
+    if "https://*.vercel.app" not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append("https://*.vercel.app")
 CSRF_COOKIE_HTTPONLY = False
 CSRF_COOKIE_SAMESITE = "Lax"
 
